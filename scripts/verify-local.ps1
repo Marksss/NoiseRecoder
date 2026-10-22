@@ -16,6 +16,6 @@ $testFiles = Get-ChildItem (Join-Path $projectRoot 'app/src/test/java/com/exampl
 $testJar = Join-Path $outputDir 'tests.jar'
 & $java "-Dkotlin.home=$KotlinHome" -cp "$kotlinLib/*" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler @mainFiles @testFiles -classpath "$AndroidJar;$JUnitJar;$HamcrestJar" -jvm-target 17 -d $testJar
 if ($LASTEXITCODE -ne 0) { throw 'Kotlin compilation failed' }
-& $java -cp "$testJar;$kotlinLib/kotlin-stdlib.jar;$JUnitJar;$HamcrestJar" org.junit.runner.JUnitCore com.example.noiserecorder.AudioLogicTest com.example.noiserecorder.WavWriterTest
+& $java -cp "$testJar;$kotlinLib/kotlin-stdlib.jar;$JUnitJar;$HamcrestJar" org.junit.runner.JUnitCore com.example.noiserecorder.AudioLogicTest com.example.noiserecorder.WavWriterTest com.example.noiserecorder.ReportLogicTest
 if ($LASTEXITCODE -ne 0) { throw 'JUnit verification failed' }
-Write-Output 'Source compilation and 7 unit tests passed. APK assembly and device tests are separate checks.'
+Write-Output 'Source compilation and unit tests passed. APK assembly and device tests are separate checks.'

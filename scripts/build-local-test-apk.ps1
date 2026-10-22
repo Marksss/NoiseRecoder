@@ -43,7 +43,7 @@ foreach ($kind in $kinds) {
     & $java -cp "$tools/lib/d8.jar" com.android.tools.r8.D8 @argsD8 *> "$out/d8-$kind.log"
     Check-Native
     $manifestPath = if ($kind -eq 'app') { "$out/AndroidManifest.xml" } else { "$out/TestManifest.xml" }
-    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 1 --version-name 1.0
+    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 2 --version-name 1.1.0
     Check-Native
     $zip = [IO.Compression.ZipFile]::Open("$out/$kind-base.apk", 'Update')
     try { Get-ChildItem "$dex/*.dex" | ForEach-Object { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $_.Name) | Out-Null } } finally { $zip.Dispose() }

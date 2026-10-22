@@ -28,6 +28,9 @@ class MainActivity : Activity() {
     private lateinit var records: LinearLayout
     private val handler = Handler(Looper.getMainLooper())
     private var exportKind = "zip"
+    private var pendingReport: String? = null
+    private val selectedRecordings = linkedSetOf<String>()
+    private var progressDialog: AlertDialog? = null
     private val ticker = object : Runnable {
         override fun run() {
             val state = MonitorService.status
@@ -40,6 +43,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
+        pendingReport = savedInstanceState?.getString("pendingReport")
+        selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
         val scroll = ScrollView(this)
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 40, 36, 40); setBackgroundColor(Color.rgb(245, 247, 250)) }
         scroll.addView(content); setContentView(scroll)
@@ -60,6 +65,19 @@ class MainActivity : Activity() {
         label("请先在此界面开启值守，再锁屏或充电。开启期间持续占用麦克风，时段外丢弃声音；通知中可随时停止。录音在监听时段结束时收尾。重启、强行停止或系统终止后需要重新开启。建议连接电源，并在系统电池设置中允许后台运行。", 13f)
         button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
         button("仅导出声级记录 CSV") { chooseExport("csv") }
+        button("选择监听时段并生成报告") { selectReportSessions() }
+        button("在手机浏览器打开 HTML 报告") { previewReport() }
+        button("导出 Word 报告（含音频附件）") { chooseReportExport("docx") }
+        button("导出独立 HTML 报告（含音频）") { chooseReportExport("html") }
+        button("导出完整报告包（Word + HTML + 音频）") { chooseReportExport("reportzip") }
+        button("删除已生成的报告副本") { deleteReports() }
+        label("报告以实际监听时段为准。新版开始保存完整声级曲线；旧录音可加入报告，但无法补齐过去未采集的声级。删除录音保留声级统计，已生成或导出的报告副本需单独删除。", 13f)
+        button("全选 / 取消选择录音") {
+            val names = EvidenceStore(this).use { it.list().map { e -> e.name } }
+            if (selectedRecordings.size == names.size) selectedRecordings.clear() else selectedRecordings.addAll(names)
+            refreshRecords()
+        }
+        button("删除选中录音") { confirmDelete(selectedRecordings.toList()) }
         button("刷新录音列表") { refreshRecords() }
         records = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(records)
@@ -114,8 +132,10 @@ class MainActivity : Activity() {
     private fun refreshRecords() {
         records.removeAllViews()
         val list = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() }
+        selectedRecordings.retainAll(list.map { it.name }.toSet())
         if (list.isEmpty()) records.addView(TextView(this).apply { text = "暂无录音，触发后将在这里显示。" })
         list.forEach { e ->
+            records.addView(CheckBox(this).apply { text="选择此录音"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
             records.addView(Button(this).apply {
                 text = "${e.name}\n${e.started}\n峰值 %.1f dB · %.1f 秒 · ${e.status}".format(e.peak, e.duration)
                 isAllCaps = false
@@ -126,7 +146,108 @@ class MainActivity : Activity() {
                     catch (_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
                 }
             })
+            records.addView(Button(this).apply { text="删除这段录音"; setOnClickListener { confirmDelete(listOf(e.name)) } })
         }
+    }
+    private fun confirmDelete(names: List<String>) {
+        if(MonitorService.running || exporting) { toast("请先停止值守并等待导出或报告生成完成"); return }
+        if(names.isEmpty()) { toast("请先选择录音"); return }
+        AlertDialog.Builder(this).setTitle("永久删除 ${names.size} 段录音？")
+            .setMessage("删除原始音频，保留监听声级、超限统计及删除标记。此操作不可撤销。已生成或导出的报告、音频副本不会被删除。")
+            .setNegativeButton("取消",null).setPositiveButton("永久删除") { _, _ ->
+                if(MonitorService.running || exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
+                exporting=true
+                Thread {
+                    var removed=0; val failures=mutableListOf<String>()
+                    try { EvidenceStore(this).use { store -> names.forEach { name -> try { store.deleteRecording(name); removed++ } catch(e:Exception) { failures.add(e.message ?: name) } } } }
+                    finally { exporting=false; runOnUiThread { selectedRecordings.removeAll(names.toSet()); refreshRecords(); toast("已删除 $removed 段" + if(failures.isEmpty()) "" else "；失败：${failures.first()}") } }
+                }.start()
+            }.show()
+    }
+    private fun reportFolder(name: String? = null): File? {
+        val base=File(filesDir,"reports").canonicalFile
+        val value=name ?: getSharedPreferences("reports",MODE_PRIVATE).getString("latest",null) ?: return null
+        val file=File(base,value).canonicalFile
+        return file.takeIf { it.parentFile==base && File(it,"READY").isFile }
+    }
+    private fun selectReportSessions() {
+        if(MonitorService.running || exporting) { toast("请先停止值守并等待其他任务完成"); return }
+        val sessions=EvidenceStore(this).use { it.recover(); it.sessions() }
+        val legacy=EvidenceStore(this).use { it.report(emptySet(),true).recordings.isNotEmpty() }
+        val labels=sessions.map { "${java.time.Instant.ofEpochMilli(it.start).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()} — ${java.time.Instant.ofEpochMilli(it.end).atZone(java.time.ZoneId.systemDefault()).toLocalTime()}\n阈值 ${it.threshold} dB · ${it.status}" }.toMutableList()
+        if(legacy) labels.add("旧版本录音（无完整监听时段及声级曲线）")
+        if(labels.isEmpty()) { toast("暂无监听时段，请先开启值守采集声音"); return }
+        val checked=BooleanArray(labels.size).apply { this[0]=true }
+        AlertDialog.Builder(this).setTitle("选择报告时段（最多 31 个）").setMultiChoiceItems(labels.toTypedArray(),checked) { _,i,value -> checked[i]=value }
+            .setNegativeButton("取消",null).setPositiveButton("生成 Word 和 HTML") { _, _ ->
+                val ids=sessions.filterIndexed { i, _ -> checked[i] }.map { it.id }.toSet()
+                val includeLegacy=legacy && checked.last()
+                if(ids.size>31 || (ids.isEmpty() && !includeLegacy)) { toast("请选择 1–31 个时段，或选择旧版本录音"); return@setPositiveButton }
+                generateReport(ids,includeLegacy)
+            }.show()
+    }
+    private fun generateReport(ids: Set<Long>, legacy: Boolean) {
+        if(MonitorService.running || exporting) { toast("请先结束当前任务"); return }
+        exporting=true
+        val progressLabel=TextView(this).apply { text="正在读取声级记录…"; setPadding(36,36,36,36) }
+        val dialog=AlertDialog.Builder(this).setTitle("生成监测报告").setView(progressLabel).setCancelable(false).create()
+        progressDialog=dialog; dialog.show()
+        Thread {
+            val root=File(filesDir,"reports/report_${java.util.UUID.randomUUID()}")
+            try {
+                EvidenceStore(this).use { store ->
+                    val report=store.report(ids,legacy)
+                    ReportBuilder(report,store.directory).generate(root) { message -> runOnUiThread { if(!isFinishing && !isDestroyed) progressLabel.text=message } }
+                }
+                check(getSharedPreferences("reports",MODE_PRIVATE).edit().putString("latest",root.name).commit())
+                runOnUiThread { toast("报告已生成，可在浏览器查看或导出 Word / HTML") }
+            } catch(e:Exception) { root.deleteRecursively(); runOnUiThread { toast("报告生成失败：${e.message}") } }
+            finally { exporting=false; runOnUiThread { if(!isDestroyed) dialog.dismiss() } }
+        }.start()
+    }
+    private fun previewReport() {
+        val root=reportFolder() ?: run { toast("请先生成报告"); return }
+        if(exporting) { toast("请等待当前任务完成"); return }
+        try {
+            ReportPreviewService.url=null; ReportPreviewService.error=null
+            startForegroundService(Intent(this,ReportPreviewService::class.java).putExtra("report",root.name))
+            val deadline=SystemClock.elapsedRealtime()+5000
+            val open=object:Runnable { override fun run() {
+                val url=ReportPreviewService.url
+                when {
+                    url!=null -> try { startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url))) } catch(_:ActivityNotFoundException) { toast("请安装浏览器后查看报告") }
+                    ReportPreviewService.error!=null -> toast("预览失败：${ReportPreviewService.error}")
+                    SystemClock.elapsedRealtime()<deadline -> handler.postDelayed(this,100)
+                    else -> toast("浏览器预览启动超时，请重试")
+                }
+            } }
+            handler.postDelayed(open,100)
+        } catch(e:Exception) { toast("无法打开预览：${e.message}") }
+    }
+    private fun chooseReportExport(kind: String) {
+        val root=reportFolder() ?: run { toast("请先生成报告"); return }
+        if(MonitorService.running || exporting) { toast("请先停止值守并等待其他任务完成"); return }
+        exportKind=kind; pendingReport=root.name
+        val extension=if(kind=="reportzip") "zip" else kind
+        val mime=when(kind) { "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; "html" -> "text/html"; else -> "application/zip" }
+        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(mime).putExtra(Intent.EXTRA_TITLE,"noise_report_${System.currentTimeMillis()}.$extension"),21)
+    }
+    private fun deleteReports() {
+        if(exporting) { toast("请等待当前任务完成"); return }
+        AlertDialog.Builder(this).setTitle("删除应用内所有报告副本？").setMessage("不会删除原始录音、声级记录或已导出到其他位置的文件。").setNegativeButton("取消",null).setPositiveButton("删除报告") { _, _ ->
+            if(exporting) return@setPositiveButton
+            stopService(Intent(this,ReportPreviewService::class.java))
+            exporting=true
+            Thread {
+                try {
+                    val base=File(filesDir,"reports").canonicalFile
+                    check(!base.exists() || base.deleteRecursively()) { "部分报告未能删除" }
+                    getSharedPreferences("reports",MODE_PRIVATE).edit().remove("latest").commit()
+                    runOnUiThread { toast("应用内报告副本已删除") }
+                } catch(e:Exception) { runOnUiThread { toast("删除失败：${e.message}") } }
+                finally { exporting=false }
+            }.start()
+        }.show()
     }
     private fun chooseExport(kind: String) {
         if (MonitorService.running) { toast("请先停止值守，确保原始录音完成保存"); return }
@@ -137,20 +258,27 @@ class MainActivity : Activity() {
     @Deprecated("Platform result API used to keep the app dependency-free")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != 20 || resultCode != RESULT_OK) return
+        if (requestCode !in setOf(20,21) || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         if (MonitorService.running) { toast("值守已开启，请停止后重新导出"); return }
         exporting = true
         val kind = exportKind
         Thread {
             try {
+                if(requestCode==21) {
+                    val root=reportFolder(pendingReport) ?: error("报告不存在，请重新生成")
+                    val output=requireNotNull(contentResolver.openOutputStream(uri,"wt"))
+                    output.use { stream -> when(kind) { "docx" -> File(root,"report.docx").inputStream().use { it.copyTo(stream) }; "html" -> ReportBuilder.exportHtml(root,stream); "reportzip" -> ReportBuilder.exportZip(root,stream); else -> error("未知报告格式") } }
+                    runOnUiThread { toast("报告导出完成，可复制到电脑查看") }
+                    return@Thread
+                }
                 EvidenceStore(this).use { store ->
                     store.recover()
                     val stream = requireNotNull(contentResolver.openOutputStream(uri, "wt"))
                     if (kind == "csv") stream.bufferedWriter(Charsets.UTF_8).use { it.write(store.csv("triggers")) }
                     else ZipOutputStream(stream.buffered()).use { zip ->
                         fun entry(name: String, value: String) { zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray(Charsets.UTF_8)); zip.closeEntry() }
-                        entry("recordings.csv", store.csv("recordings")); entry("triggers.csv", store.csv("triggers"))
+                        listOf("recordings","triggers","sessions","levels","exceed_events").forEach { entry("$it.csv",store.csv(it)) }
                         val hashes = StringBuilder()
                         store.list().forEach { evidence ->
                             val f = File(store.directory, evidence.name)
@@ -171,7 +299,8 @@ class MainActivity : Activity() {
         }.start()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putString("exportKind", exportKind); super.onSaveInstanceState(outState) }
+    override fun onSaveInstanceState(outState: Bundle) { outState.putString("exportKind", exportKind); outState.putString("pendingReport",pendingReport); outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings)); super.onSaveInstanceState(outState) }
     override fun onResume() { super.onResume(); handler.post(ticker); refreshRecords() }
     override fun onPause() { handler.removeCallbacks(ticker); super.onPause() }
+    override fun onDestroy() { progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }

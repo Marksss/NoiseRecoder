@@ -66,6 +66,7 @@ class SmokeInstrumentation : Instrumentation() {
             }
             val active = store.list().single { it.name !in initial }
             check(active.status == "recording" && active.duration > 65.0) { "Continuous threshold did not extend beyond 60 seconds" }
+            check(runCatching { store.deleteRecording(active.name) }.isFailure) { "Active recording was deletable" }
             note("PASS: lock-screen foreground recording and continuous extension beyond 65 seconds")
             stopMonitor()
             val result = store.list().single { it.name !in initial }
@@ -100,14 +101,96 @@ class SmokeInstrumentation : Instrumentation() {
             try { targetContext.contentResolver.openFileDescriptor(uri, "rw")?.close() } catch (_: Exception) { writeRejected = true }
             check(writeRejected)
             note("PASS: evidence provider allows reading and rejects writing")
+            reportAndDeletion(store,result,initial)
             success = true
         } catch (e: Throwable) { note("FAIL: ${e.stackTraceToString()}") }
         finally {
             try { stopMonitor() } catch (_: Exception) { }
+            targetContext.stopService(Intent(targetContext,ReportPreviewService::class.java))
             original.save(targetContext)
+            // Synthetic arithmetic fixtures must never appear as real monitored periods.
+            store.sessions().filter { it.status=="test_fixture" }.forEach { fixture ->
+                val key=arrayOf(fixture.id.toString())
+                val recordings=store.readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings WHERE session_id=?",key).use { c -> c.moveToFirst(); c.getLong(0) }
+                if(recordings==0L) {
+                    val db=store.writableDatabase
+                    db.beginTransaction()
+                    try { db.delete("levels","session_id=?",key); db.delete("exceed_events","session_id=?",key); db.delete("sessions","id=?",key); db.setTransactionSuccessful() }
+                    finally { db.endTransaction() }
+                }
+            }
             store.close()
             File(targetContext.filesDir, "smoke-report.txt").writeText(report.toString())
             finish(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED, Bundle().apply { putString("stream", report.toString()); putBoolean("success", success) })
         }
+    }
+    private fun reportAndDeletion(store: EvidenceStore, recording: Evidence, initial: Set<String>) {
+        val id=store.readableDatabase.rawQuery("SELECT session_id FROM recordings WHERE name=?",arrayOf(recording.name)).use { c -> check(c.moveToFirst() && !c.isNull(0)); c.getLong(0) }
+        val data=store.report(setOf(id),false)
+        check(data.sessions.size==1 && data.eventCount==1 && data.observedMs>65000 && data.exceededMs==data.observedMs)
+        check(data.sessions.single().samples.size>=65)
+        note("PASS: real monitoring sessions, 1-second levels and one continuous exceedance episode")
+        // Known 100 ms samples verify split events and avoid treating per-second triggers as events.
+        val time=System.currentTimeMillis()
+        val fixture=SessionLogger(store,MonitorSettings(threshold=45.0),time)
+        val levels=List(10){40.0}+List(12){50.0}+List(5){40.0}+List(3){60.0}+List(10){40.0}
+        levels.forEachIndexed { i,level -> fixture.add(time+i*100,100,level) }
+        fixture.close("test_fixture")
+        val known=store.report(setOf(fixture.id),false)
+        check(known.eventCount==2 && known.observedMs==4000L && known.exceededMs==1500L)
+        check(known.sessions.single().events.map { it.duration }==listOf(1200L,300L))
+        note("PASS: two separated exceedance events, exact durations and below-threshold monitoring")
+        val root=File(targetContext.filesDir,"reports/report_${java.util.UUID.randomUUID()}")
+        ReportBuilder(data,store.directory).generate(root)
+        check(File(root,"READY").isFile)
+        ZipFile(File(root,"report.docx")).use { zip ->
+            check(zip.getEntry("word/embeddings/audio1.bin")!=null)
+            val xml=zip.getInputStream(zip.getEntry("word/document.xml")).bufferedReader().readText()
+            check(xml.contains("共记录 1 次连续超限") && xml.contains(recording.name))
+            javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(java.io.ByteArrayInputStream(xml.toByteArray()))
+        }
+        val html=File(root,"report.html").readText()
+        check(html.contains("共记录 1 次连续超限") && html.contains("audio/${recording.name}") && html.contains("data:image/png;base64,"))
+        val standalone=File(targetContext.cacheDir,"report-standalone.html")
+        standalone.outputStream().use { ReportBuilder.exportHtml(root,it) }
+        val standaloneText=standalone.readText()
+        check(standaloneText.contains("src=\"data:audio/wav;base64,") && !standaloneText.contains("src=\"audio/"))
+        val payload=standaloneText.substringAfter("src=\"data:audio/wav;base64,").substringBefore('"')
+        check(java.util.Base64.getDecoder().decode(payload).contentEquals(File(store.directory,recording.name).readBytes()))
+        val legacyRoot=File(targetContext.cacheDir,"legacy-report-${java.util.UUID.randomUUID()}")
+        val legacy=NoiseReport(emptyList(),listOf(ReportRecording(Evidence("legacy.wav","2020-01-01T00:00:00Z",50.0,60.0,"deleted"),null,45.0,90.0)))
+        ReportBuilder(legacy,store.directory).generate(legacyRoot)
+        check(File(legacyRoot,"report.html").readText().contains("无数据，无法统计"))
+        check(!File(legacyRoot,"report.html").readText().contains("共记录 0 次"))
+        legacyRoot.deleteRecursively()
+        check(targetContext.getSharedPreferences("reports",0).edit().putString("latest",root.name).commit())
+        note("PASS: DOCX embeds WAV; HTML statistics match; standalone HTML preserves audio bytes")
+        runOnMainSync { targetContext.startForegroundService(Intent(targetContext,ReportPreviewService::class.java).putExtra("report",root.name)) }
+        waitFor { ReportPreviewService.url!=null }
+        val uri=java.net.URI(requireNotNull(ReportPreviewService.url))
+        fun get(path:String,range:String=""):ByteArray = java.net.Socket(uri.host,uri.port).use { socket ->
+            socket.soTimeout=10000
+            socket.getOutputStream().write("GET $path HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n$range\r\n".toByteArray(Charsets.US_ASCII))
+            socket.getInputStream().readBytes()
+        }
+        val response=get(uri.path).toString(Charsets.UTF_8)
+        check(response.startsWith("HTTP/1.1 200") && response.contains("环境声音监测报告"))
+        val audioPath=uri.path.substringBeforeLast('/')+"/audio/${recording.name}"
+        val range=get(audioPath,"Range: bytes=0-43\r\n").toString(Charsets.ISO_8859_1)
+        check(range.startsWith("HTTP/1.1 206") && range.contains("RIFF"))
+        check(get("/invalid/report.html").toString(Charsets.US_ASCII).startsWith("HTTP/1.1 404"))
+        targetContext.stopService(Intent(targetContext,ReportPreviewService::class.java))
+        note("PASS: loopback browser HTML, seekable WAV range requests and token isolation")
+        store.deleteRecording(recording.name)
+        check(!File(store.directory,recording.name).exists() && store.list().none { it.name==recording.name })
+        val deleted=store.report(setOf(id),false)
+        check(deleted.eventCount==1 && deleted.recordings.single().evidence.status=="deleted")
+        check(initial.all { old -> store.list().any { it.name==old } })
+        check(File(root,"audio/${recording.name}").isFile)
+        val after=File(targetContext.filesDir,"reports/report_${java.util.UUID.randomUUID()}")
+        ReportBuilder(deleted,store.directory).generate(after)
+        check(!File(after,"report.html").readText().contains("<audio"))
+        check(File(after,"report.html").readText().contains("原始录音已删除"))
+        note("PASS: deletion removes only new test WAV; analytics, existing originals and report snapshots survive")
     }
 }

@@ -52,6 +52,7 @@ class MonitorService : Service() {
         var lastTrigger = Long.MIN_VALUE / 2
         var lastNotification = 0L
         var finishReason = "complete"
+        var session: SessionLogger? = null
         fun closeRecording(reason: String) {
             val active = wav ?: return
             wav = null
@@ -82,10 +83,14 @@ class MonitorService : Service() {
                 currentDbfs = AudioLogic.dbfs(samples, count)
                 currentLevel = currentDbfs + settings.offset
                 if (!inside) {
-                    if (wasInside) { closeRecording("window_end"); ring.clear() }
+                    if (wasInside) { closeRecording("window_end"); session?.close("window_end"); session = null; ring.clear() }
                     status = "定时待命 · 非监听时段不保存声音"
                 } else {
                     if (!wasInside) ring.clear()
+                    val frameMs = count * 1000L / AudioLogic.RATE
+                    val frameTime = System.currentTimeMillis() - frameMs
+                    if (session == null) session = SessionLogger(store, settings, frameTime)
+                    session!!.add(frameTime, frameMs, currentLevel)
                     val bytes = ByteArray(count * 2)
                     for (i in 0 until count) { bytes[i * 2] = samples[i].toByte(); bytes[i * 2 + 1] = (samples[i].toInt() shr 8).toByte() }
                     val triggered = currentLevel >= settings.threshold
@@ -96,7 +101,7 @@ class MonitorService : Service() {
                         check(store.directory.usableSpace > 32L * 1024 * 1024) { "存储空间不足 32 MB，已停止值守" }
                         val name = "noise_${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))}_${java.util.UUID.randomUUID().toString().take(8)}.wav"
                         peak = currentLevel
-                        store.begin(name, Instant.now().toString(), peak, settings)
+                        store.begin(name, Instant.now().toString(), peak, settings, session!!.id)
                         wav = WavWriter(File(store.directory, name))
                         if (!rollover) wav!!.write(ring.snapshot())
                         if (!rollover) tail.extend(mono)
@@ -123,6 +128,7 @@ class MonitorService : Service() {
         } catch (e: Exception) { finishReason = "error"; status = "监听停止：${e.message}" }
         finally {
             try { closeRecording(finishReason) } catch (e: Exception) { status = "文件收尾失败：${e.message}" }
+            try { session?.close(finishReason) } catch (e: Exception) { status = "声级记录收尾失败：${e.message}" }
             try { recorder?.stop() } catch (_: Exception) { }
             recorder?.release(); store.close()
             alive.set(false); running = false
