@@ -5,10 +5,12 @@ import android.app.*
 import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.*
 import android.provider.Settings
 import android.view.ViewGroup
+import android.view.View
 import android.widget.*
 import java.io.File
 import java.security.MessageDigest
@@ -26,6 +28,11 @@ class MainActivity : Activity() {
     private lateinit var threshold: EditText
     private lateinit var offset: EditText
     private lateinit var records: LinearLayout
+    private lateinit var scheduleSummary: TextView
+    private val pages = mutableListOf<ScrollView>()
+    private val tabs = mutableListOf<Button>()
+    private var selectedTab = 0
+    private val pendingScrolls = IntArray(3) { -1 }
     private val handler = Handler(Looper.getMainLooper())
     private var exportKind = "zip"
     private var pendingReport: String? = null
@@ -45,42 +52,106 @@ class MainActivity : Activity() {
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
         pendingReport = savedInstanceState?.getString("pendingReport")
         selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
-        val scroll = ScrollView(this)
-        content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 40, 36, 40); setBackgroundColor(Color.rgb(245, 247, 250)) }
-        scroll.addView(content); setContentView(scroll)
-        label("夜间声证", 28f)
+        savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
+        val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
+        root.addView(TextView(this).apply { text="夜间声证"; textSize=24f; setTextColor(Color.rgb(25,42,58)); setPadding(dp(16),dp(16),dp(16),dp(4)) })
+        root.addView(tabBar)
+        val pageHost = FrameLayout(this)
+        root.addView(pageHost, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        setContentView(root)
+        listOf("首页", "记录", "设置").forEachIndexed { index, title ->
+            tabBar.addView(Button(this).apply {
+                text=title; isAllCaps=false; textSize=16f
+                setOnClickListener { selectTab(index) }
+                tabs.add(this)
+            },LinearLayout.LayoutParams(0,dp(48),1f).apply { setMargins(dp(3),0,dp(3),0) })
+            val scroll=ScrollView(this).apply { isFillViewport=true }
+            scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                if(scroll.visibility==View.VISIBLE && scroll.height>0 && pendingScrolls[index]>=0) {
+                    val y=pendingScrolls[index]; pendingScrolls[index]=-1; scroll.scrollTo(0,y)
+                }
+            }
+            pages.add(scroll)
+            pageHost.addView(scroll,FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        fun page(index: Int) {
+            content=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(16),dp(8),dp(16),dp(24)) }
+            pages[index].addView(content)
+        }
+        page(0)
+        label("监听首页", 23f)
         label("自动监听 · 原始录音 · 本地保存", 14f)
         status = label("", 18f); level = label("", 18f)
-        val s = MonitorSettings.load(this)
-        start = field("监听开始（HH:mm）", clock(s.start))
-        end = field("监听结束（HH:mm，支持跨午夜）", clock(s.end))
-        threshold = field("触发阈值（估算 dB SPL）", s.threshold.toString(), true)
-        offset = field("校准偏移（dB SPL = dBFS + 偏移）", s.offset.toString(), true)
-        button("保存设置") { saveSettings() }
-        button("用参考声级校准") { calibrate() }
-        label("默认 02:30–06:00、阈值 45 dB。默认偏移 90 仅为占位值，未经校准不代表真实声压级；采用 100 ms RMS，无 A 计权，不能代替专业声级计。设置在下次开启值守时生效。", 13f)
+        scheduleSummary = label("", 16f)
+        updateScheduleSummary()
         button("开启每日值守") { startMonitoring() }
         button("停止值守并保存录音") { stopService(Intent(this, MonitorService::class.java)) }
-        button("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        label("请先在此界面开启值守，再锁屏或充电。开启期间持续占用麦克风，时段外丢弃声音；通知中可随时停止。录音在监听时段结束时收尾。重启、强行停止或系统终止后需要重新开启。建议连接电源，并在系统电池设置中允许后台运行。", 13f)
-        button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
-        button("仅导出声级记录 CSV") { chooseExport("csv") }
+        button("查看录音记录") { selectTab(1) }
+        button("调整监听设置") { selectTab(2) }
+        label("请先开启值守，再锁屏或充电。时段外丢弃声音；通知中也可停止值守。重启或强行停止后需重新开启。",14f)
+
+        page(1)
+        label("录音记录", 23f)
         button("选择监听时段并生成报告") { selectReportSessions() }
         button("在手机浏览器打开 HTML 报告") { previewReport() }
-        button("导出 Word 报告（含音频附件）") { chooseReportExport("docx") }
-        button("导出独立 HTML 报告（含音频）") { chooseReportExport("html") }
-        button("导出完整报告包（Word + HTML + 音频）") { chooseReportExport("reportzip") }
-        button("删除已生成的报告副本") { deleteReports() }
-        label("报告以实际监听时段为准。新版开始保存完整声级曲线；旧录音可加入报告，但无法补齐过去未采集的声级。删除录音保留声级统计，已生成或导出的报告副本需单独删除。", 13f)
-        button("全选 / 取消选择录音") {
-            val names = EvidenceStore(this).use { it.list().map { e -> e.name } }
-            if (selectedRecordings.size == names.size) selectedRecordings.clear() else selectedRecordings.addAll(names)
+        button("导出报告…") {
+            AlertDialog.Builder(this).setTitle("选择报告格式")
+                .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
+                .setNegativeButton("取消",null).show()
+        }
+        label("勾选录音可批量删除，点击录音可回放。",14f)
+        val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        fun recordAction(title: String, action: () -> Unit) { actions.addView(Button(this).apply { text=title; isAllCaps=false; setOnClickListener { action() } },LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f)) }
+        recordAction("全选 / 取消") {
+            val names=EvidenceStore(this).use { it.list().map { e -> e.name } }
+            if(selectedRecordings.size==names.size) selectedRecordings.clear() else selectedRecordings.addAll(names)
             refreshRecords()
         }
-        button("删除选中录音") { confirmDelete(selectedRecordings.toList()) }
-        button("刷新录音列表") { refreshRecords() }
-        records = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        recordAction("删除选中") { confirmDelete(selectedRecordings.toList()) }
+        recordAction("刷新") { refreshRecords() }
+        content.addView(actions)
+        records=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(records)
+
+        page(2)
+        label("监听设置", 23f)
+        val s = MonitorSettings.load(this)
+        start = field("监听开始（HH:mm）", savedInstanceState?.getString("draftStart") ?: clock(s.start))
+        end = field("监听结束（HH:mm，支持跨午夜）", savedInstanceState?.getString("draftEnd") ?: clock(s.end))
+        threshold = field("触发阈值（估算 dB SPL）", savedInstanceState?.getString("draftThreshold") ?: s.threshold.toString(), true)
+        offset = field("校准偏移（dB SPL = dBFS + 偏移）", savedInstanceState?.getString("draftOffset") ?: s.offset.toString(), true)
+        button("保存设置") { saveSettings() }
+        button("用参考声级校准") { calibrate() }
+        label("修改后请保存，再从首页开启值守。默认 02:30–06:00、阈值 45 dB。默认偏移 90 仅为占位值，未经校准不代表真实声压级；采用 100 ms RMS，无 A 计权，不能代替专业声级计。设置在下次开启值守时生效。", 13f)
+        label("后台运行",19f)
+        button("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        label("值守期间持续占用麦克风，监听时段外不保存声音。录音在时段结束时收尾。建议连接电源，并在系统电池设置中允许后台运行。",13f)
+        label("数据管理",19f)
+        button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
+        button("仅导出声级记录 CSV") { chooseExport("csv") }
+        button("删除已生成的报告副本") { deleteReports() }
+        label("报告以实际监听时段为准。旧录音无法补齐过去未采集的声级曲线。删除原始录音保留声级统计；已生成或导出的副本需单独删除。",13f)
+        selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
+    }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun selectTab(index: Int) {
+        selectedTab=index
+        pages.forEachIndexed { page, scroll -> scroll.visibility=if(page==index) View.VISIBLE else View.GONE }
+        tabs.forEachIndexed { tab, button ->
+            val selected=tab==index
+            button.isSelected=selected
+            button.setTextColor(if(selected) Color.WHITE else Color.rgb(25,42,58))
+            button.background=GradientDrawable().apply { cornerRadius=dp(10).toFloat(); setColor(if(selected) Color.rgb(28,100,160) else Color.rgb(228,234,240)) }
+            button.contentDescription="${button.text}，${if(selected) "当前页" else "切换页面"}"
+        }
+        currentFocus?.clearFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(window.decorView.windowToken,0)
+        if(index==1 && ::records.isInitialized) refreshRecords()
+    }
+    private fun updateScheduleSummary() {
+        val saved=MonitorSettings.load(this)
+        scheduleSummary.text="已保存计划：${clock(saved.start)}—${clock(saved.end)}\n触发阈值：${ReportFormat.number(saved.threshold)} dB（需校准）"
     }
     private fun label(text: String, size: Float): TextView = TextView(this).apply { this.text = text; textSize = size; setTextColor(Color.rgb(25, 42, 58)); setPadding(0, 10, 0, 10); content.addView(this) }
     private fun field(title: String, value: String, number: Boolean = false): EditText {
@@ -99,12 +170,12 @@ class MainActivity : Activity() {
         require(s.start != s.end) { "开始和结束时间不能相同" }
         require(s.threshold.isFinite() && s.threshold in 0.0..140.0) { "阈值范围为 0–140 dB" }
         require(s.offset.isFinite() && s.offset in -20.0..160.0) { "偏移范围为 -20–160 dB" }
-        s.save(this); toast("设置已保存，下次开启值守生效"); true
+        s.save(this); updateScheduleSummary(); toast("设置已保存，下次开启值守生效"); true
     } catch (e: Exception) { toast(e.message ?: "设置无效"); false }
     private fun startMonitoring() {
         if (exporting) { toast("请等待导出完成"); return }
         if (MonitorService.running) { toast("已经在值守中；修改设置后请停止并重新开启"); return }
-        if (!saveSettings()) return
+        updateScheduleSummary()
         val permissions = mutableListOf<String>()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -299,8 +370,15 @@ class MainActivity : Activity() {
         }.start()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putString("exportKind", exportKind); outState.putString("pendingReport",pendingReport); outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings)); super.onSaveInstanceState(outState) }
-    override fun onResume() { super.onResume(); handler.post(ticker); refreshRecords() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
+        outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
+        outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
+        outState.putString("draftStart",start.text.toString()); outState.putString("draftEnd",end.text.toString())
+        outState.putString("draftThreshold",threshold.text.toString()); outState.putString("draftOffset",offset.text.toString())
+        super.onSaveInstanceState(outState)
+    }
+    override fun onResume() { super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords() }
     override fun onPause() { handler.removeCallbacks(ticker); super.onPause() }
     override fun onDestroy() { progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }
