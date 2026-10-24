@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import java.io.File
 import java.time.LocalTime
 import java.util.Locale
@@ -70,7 +71,8 @@ class DutyModeInstrumentation : Instrumentation() {
             SystemClock.sleep(1500)
             check(!MonitorService.listening && store.list().count { it.name !in existing }==1)
             check(store.sessions().count { it.id !in existingSessions }==1)
-            note("PASS: daily button arms schedule without microphone, WAV or session before start")
+            runOnMainSync { check((findButton(activity!!.window.decorView,"预约每日值守") as CheckBox).isChecked) }
+            note("PASS: checking daily reservation arms schedule without microphone, WAV or session before start")
             note(String.format(Locale.US,"Waiting for real device window %02d:%02d-%02d:%02d",start/60,start%60,end/60,end%60))
             uiAutomation.executeShellCommand("input keyevent 223").close()
             waitFor(65000) { MonitorService.listening && store.list().count { it.name !in existing }==2 }
@@ -86,10 +88,16 @@ class DutyModeInstrumentation : Instrumentation() {
             check(size+44==header.size)
             check(store.sessions().filter { it.id !in existingSessions }.all { it.status in setOf("user_stop","window_end") })
             note("PASS: scheduled end stops microphone, finalizes WAV/session and waits for next daily window")
-            stop()
+            runOnMainSync {
+                val reservation=findButton(activity!!.window.decorView,"预约每日值守") as CheckBox
+                check(reservation.isChecked)
+                reservation.performClick()
+            }
+            waitFor { !MonitorService.running }
             SystemClock.sleep(700)
             check(!MonitorService.running && !MonitorService.listening)
-            note("PASS: manual stop cancels daily reservation")
+            runOnMainSync { check(!(findButton(activity!!.window.decorView,"预约每日值守") as CheckBox).isChecked) }
+            note("PASS: unchecking daily reservation cancels service and clears checked state")
             success=true
         } catch(e: Throwable) { note("FAIL: ${e.stackTraceToString()}") }
         finally {

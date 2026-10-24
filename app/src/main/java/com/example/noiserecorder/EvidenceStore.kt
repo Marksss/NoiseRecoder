@@ -8,7 +8,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.time.Instant
 
-data class Evidence(val name: String, val started: String, val peak: Double, val duration: Double, val status: String)
+data class Evidence(val name: String, val started: String, val peak: Double, val duration: Double, val status: String, val sessionId: Long? = null)
 
 class EvidenceStore(context: Context) : SQLiteOpenHelper(context, "evidence.db", null, 2) {
     val directory = File(context.filesDir, "recordings").apply { mkdirs() }
@@ -39,7 +39,33 @@ class EvidenceStore(context: Context) : SQLiteOpenHelper(context, "evidence.db",
     fun finish(name: String, peak: Double, duration: Double, status: String) {
         writableDatabase.update("recordings", ContentValues().apply { put("peak", peak); put("duration", duration); put("status", status) }, "name=?", arrayOf(name))
     }
-    fun list(): List<Evidence> = readableDatabase.rawQuery("SELECT name,started,peak,duration,status FROM recordings WHERE status NOT IN ('deleted','deleting') ORDER BY started DESC", null).use { c -> buildList { while(c.moveToNext()) add(Evidence(c.getString(0), c.getString(1), c.getDouble(2), c.getDouble(3), c.getString(4))) } }
+    fun list(): List<Evidence> = readableDatabase.rawQuery("SELECT name,started,peak,duration,status,session_id FROM recordings WHERE status NOT IN ('deleted','deleting') ORDER BY started DESC", null).use { c -> buildList { while(c.moveToNext()) add(Evidence(c.getString(0), c.getString(1), c.getDouble(2), c.getDouble(3), c.getString(4), if(c.isNull(5)) null else c.getLong(5))) } }
+    /** A durable session marker is written before touching audio; DB removal commits together. */
+    fun deleteSession(id: Long) {
+        val key=arrayOf(id.toString())
+        val old=readableDatabase.rawQuery("SELECT status FROM sessions WHERE id=?",key).use { c -> check(c.moveToFirst()) { "监听时段不存在" }; c.getString(0) }
+        check(old!="monitoring") { "请先停止该时段的值守" }
+        val rows=readableDatabase.rawQuery("SELECT name,status FROM recordings WHERE session_id=?",key).use { c -> buildList { while(c.moveToNext()) add(c.getString(0) to c.getString(1)) } }
+        check(rows.none { it.second=="recording" }) { "该时段仍有正在录制的音频，请先停止值守" }
+        writableDatabase.execSQL("UPDATE sessions SET status='deleting' WHERE id=?",arrayOf(id))
+        try {
+            rows.forEach { deleteRecording(it.first) }
+            val db=writableDatabase
+            db.beginTransaction()
+            try {
+                db.execSQL("DELETE FROM triggers WHERE name IN (SELECT name FROM recordings WHERE session_id=?)",arrayOf(id))
+                db.delete("recordings","session_id=?",key)
+                db.delete("levels","session_id=?",key)
+                db.delete("exceed_events","session_id=?",key)
+                db.delete("sessions","id=?",key)
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+        } catch(e: Exception) {
+            // An explicit I/O error leaves already deleted WAVs marked deleted and analytics intact.
+            writableDatabase.execSQL("UPDATE sessions SET status=? WHERE id=?",arrayOf<Any>(if(old=="deleting") "interrupted" else old,id))
+            throw e
+        }
+    }
     /** Analytics remain intact. A durable intent lets recovery finish an interrupted deletion. */
     fun deleteRecording(name: String) {
         require(File(directory, name).canonicalFile.parentFile == directory.canonicalFile && name.endsWith(".wav"))
@@ -54,6 +80,8 @@ class EvidenceStore(context: Context) : SQLiteOpenHelper(context, "evidence.db",
         writableDatabase.execSQL("UPDATE recordings SET status='deleted' WHERE name=?", arrayOf(name))
     }
     fun recover() {
+        val deletingSessions=readableDatabase.rawQuery("SELECT id FROM sessions WHERE status='deleting'",null).use { c -> buildList { while(c.moveToNext()) add(c.getLong(0)) } }
+        deletingSessions.forEach { deleteSession(it) }
         readableDatabase.rawQuery("SELECT name FROM recordings WHERE status='deleting'", null).use { c -> while(c.moveToNext()) deleteRecording(c.getString(0)) }
         writableDatabase.execSQL("UPDATE sessions SET status='interrupted' WHERE status='monitoring'")
         writableDatabase.execSQL("DELETE FROM exceed_events WHERE duration_ms=0")

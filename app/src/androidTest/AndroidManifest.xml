@@ -1,3 +1,4 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <instrumentation android:name="com.example.noiserecorder.DutyModeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Duty mode verification" />
+    <instrumentation android:name="com.example.noiserecorder.RecordDeletionInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Record deletion verification" />
 </manifest>

@@ -85,6 +85,22 @@ adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.e
 adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/duty-mode-test.txt
 ```
 
+## 1.4 预约勾选与时段删除验证
+
+- 首页将每日预约改为一个可勾选控件，勾选启用、取消勾选取消预约；立即开启/停止使用独立按钮，并与预约互斥。
+- 在 Android 11 测试设备上重新运行值守专项检查，5 项通过：勾选后正常待命、锁屏到点开始、时段结束仍保持勾选、取消勾选停止服务并清除勾选；原设置和原始录音保持不变。测试时间段为 11:57—11:58。
+- 记录页按实际监听时段分组，保留单文件和批量音频删除，新增整时段永久删除及确认框，没有录音的时段也可删除。
+- `RecordDeletionInstrumentation` 在设备 `FA7951A00460` 上 **5 项 PASS、无 FAIL**，验证单文件删除保留统计，整段清理包含已删录音索引在内的全部关联表和音频，其他时段及副本不受影响，删除标记中断恢复，活动时段/录音保护，以及确认框取消与确认。
+- 删除测试仅创建和删除自己的样本；结束时断言原有录音名称集合和监听时段 ID 集合均保持不变。没有删除用户已有录音或报告。
+- 最终源码编译和 **14 项 JUnit 测试通过**，本地备用 APK 已安装。未重复运行完整旧版报告集成套件或标准 Gradle 构建，Android 14–16 仍待真机验证。
+
+删除专项检查命令（先停止值守或取消预约）：
+
+```powershell
+adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.example.noiserecorder.RecordDeletionInstrumentation
+adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/record-deletion-test.txt
+```
+
 ## 标准构建与测试
 
 ```powershell

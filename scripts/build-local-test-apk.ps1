@@ -26,7 +26,7 @@ $tests = @(Get-ChildItem "$root/app/src/androidTest/java/com/example/noiserecord
 Check-Native
 $manifest = [IO.File]::ReadAllText("$root/app/src/main/AndroidManifest.xml").Replace('<manifest xmlns:android=', '<manifest package="com.example.noiserecorder" xmlns:android=').Replace('${applicationId}', 'com.example.noiserecorder').Replace('<application ', '<application android:debuggable="true" ')
 [IO.File]::WriteAllText("$out/AndroidManifest.xml", $manifest)
-[IO.File]::WriteAllText("$out/TestManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.noiserecorder.test"><uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35"/><application android:debuggable="true" android:label="Noise smoke tests"/><instrumentation android:name="com.example.noiserecorder.SmokeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Noise device verification"/><instrumentation android:name="com.example.noiserecorder.DutyModeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Duty mode verification"/></manifest>')
+[IO.File]::WriteAllText("$out/TestManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.noiserecorder.test"><uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35"/><application android:debuggable="true" android:label="Noise smoke tests"/><instrumentation android:name="com.example.noiserecorder.SmokeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Noise device verification"/><instrumentation android:name="com.example.noiserecorder.DutyModeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Duty mode verification"/><instrumentation android:name="com.example.noiserecorder.RecordDeletionInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Record deletion verification"/></manifest>')
 $key = "$out/test.keystore"
 if (!(Test-Path -LiteralPath $key)) {
     & "$JavaHome/bin/keytool.exe" -genkeypair -keystore $key -storepass android -keypass android -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 3650
@@ -43,7 +43,7 @@ foreach ($kind in $kinds) {
     & $java -cp "$tools/lib/d8.jar" com.android.tools.r8.D8 @argsD8 *> "$out/d8-$kind.log"
     Check-Native
     $manifestPath = if ($kind -eq 'app') { "$out/AndroidManifest.xml" } else { "$out/TestManifest.xml" }
-    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 4 --version-name 1.3.0
+    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 6 --version-name 1.4.0
     Check-Native
     $zip = [IO.Compression.ZipFile]::Open("$out/$kind-base.apk", 'Update')
     try { Get-ChildItem "$dex/*.dex" | ForEach-Object { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $_.Name) | Out-Null } } finally { $zip.Dispose() }

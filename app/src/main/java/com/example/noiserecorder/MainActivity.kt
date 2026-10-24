@@ -29,6 +29,12 @@ class MainActivity : Activity() {
     private lateinit var offset: EditText
     private lateinit var records: LinearLayout
     private lateinit var scheduleSummary: TextView
+    private lateinit var dailyReservation: CheckBox
+    private lateinit var immediateStart: Button
+    private lateinit var immediateStop: Button
+    private var monitorStartPending=false
+    private var monitorStartDeadline=0L
+    private var monitorStopPending=false
     private val pages = mutableListOf<ScrollView>()
     private val tabs = mutableListOf<Button>()
     private var selectedTab = 0
@@ -38,6 +44,8 @@ class MainActivity : Activity() {
     private var pendingReport: String? = null
     private var pendingMonitorMode = MonitorMode.DAILY
     private val selectedRecordings = linkedSetOf<String>()
+    private val expandedSessions = linkedSetOf<Long>()
+    private var recordGroupsInitialized=false
     private var progressDialog: AlertDialog? = null
     private val ticker = object : Runnable {
         override fun run() {
@@ -49,6 +57,7 @@ class MainActivity : Activity() {
                 else -> "声级：等待开启值守"
             }
             if (level.text.toString() != reading) level.text = reading
+            updateMonitoringControls()
             handler.postDelayed(this, 500)
         }
     }
@@ -57,7 +66,11 @@ class MainActivity : Activity() {
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
         pendingReport = savedInstanceState?.getString("pendingReport")
         pendingMonitorMode = MonitorMode.fromValue(savedInstanceState?.getString("pendingMonitorMode"))
+        monitorStartPending=savedInstanceState?.getBoolean("monitorStartPending") ?: false
+        monitorStartDeadline=savedInstanceState?.getLong("monitorStartDeadline") ?: 0L
         selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
+        expandedSessions.addAll(savedInstanceState?.getLongArray("expandedSessions")?.toList() ?: emptyList())
+        recordGroupsInitialized=savedInstanceState?.getBoolean("recordGroupsInitialized") ?: false
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
         val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
@@ -91,12 +104,21 @@ class MainActivity : Activity() {
         status = label("", 18f); level = label("", 18f)
         scheduleSummary = label("", 16f)
         updateScheduleSummary()
-        button("立即开启值守") { startMonitoring(MonitorMode.IMMEDIATE) }
-        button("预约每日值守") { startMonitoring(MonitorMode.DAILY) }
-        button("停止值守 / 取消预约") { stopService(Intent(this, MonitorService::class.java)) }
+        dailyReservation=CheckBox(this).apply {
+            text="预约每日值守"; textSize=18f; setTextColor(Color.rgb(25,42,58)); minHeight=dp(48)
+            setOnClickListener {
+                if(isChecked) startMonitoring(MonitorMode.DAILY)
+                else if(MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY) stopMonitoring()
+                updateMonitoringControls()
+            }
+            content.addView(this)
+        }
+        immediateStart=button("立即开启值守") { startMonitoring(MonitorMode.IMMEDIATE) }
+        immediateStop=button("停止立即值守") { stopMonitoring() }
+        updateMonitoringControls()
         button("查看录音记录") { selectTab(1) }
         button("调整监听设置") { selectTab(2) }
-        label("立即值守：现在开始监听，手动停止才结束。\n每日预约：每天在已保存时段内监听，结束后停止采集并保存录音，等待下一天。停止按钮会取消预约。重启或强行停止后需重新开启。",14f)
+        label("勾选预约：每天在已保存时段内监听，取消勾选会保存录音并取消预约。\n立即值守：现在开始监听，手动停止才结束。两种方式互斥，切换前先结束当前方式。重启或强行停止后需重新开启。",14f)
 
         page(1)
         label("录音记录", 23f)
@@ -107,7 +129,7 @@ class MainActivity : Activity() {
                 .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
                 .setNegativeButton("取消",null).show()
         }
-        label("勾选录音可批量删除，点击录音可回放。",14f)
+        label("按实际监听时段分组；可删除整个时段，或展开后回放、勾选和删除单个录音。",14f)
         val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
         fun recordAction(title: String, action: () -> Unit) { actions.addView(Button(this).apply { text=title; isAllCaps=false; setOnClickListener { action() } },LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f)) }
         recordAction("全选 / 取消") {
@@ -165,7 +187,23 @@ class MainActivity : Activity() {
         label(title, 14f)
         return EditText(this).apply { setText(value); setSingleLine(); if (number) inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED; content.addView(this) }
     }
-    private fun button(title: String, action: () -> Unit) { content.addView(Button(this).apply { text = title; isAllCaps = false; setOnClickListener { action() } }) }
+    private fun button(title: String, action: () -> Unit) = Button(this).apply { text = title; isAllCaps = false; setOnClickListener { action() }; content.addView(this) }
+    private fun updateMonitoringControls() {
+        if(!::dailyReservation.isInitialized || !::immediateStart.isInitialized) return
+        if(MonitorService.running || SystemClock.elapsedRealtime()>=monitorStartDeadline) monitorStartPending=false
+        if(!MonitorService.running) monitorStopPending=false
+        val running=MonitorService.running
+        val daily=running && MonitorService.activeMode==MonitorMode.DAILY
+        dailyReservation.isChecked=!monitorStopPending && (daily || (monitorStartPending && pendingMonitorMode==MonitorMode.DAILY))
+        dailyReservation.isEnabled=!monitorStartPending && !monitorStopPending && (!running || daily)
+        immediateStart.isEnabled=!running && !monitorStartPending && !monitorStopPending
+        immediateStop.isEnabled=running && !daily && !monitorStopPending
+    }
+    private fun stopMonitoring() {
+        monitorStopPending=true
+        stopService(Intent(this,MonitorService::class.java))
+        updateMonitoringControls()
+    }
     private fun clock(min: Int) = String.format(Locale.US, "%02d:%02d", min / 60, min % 60)
     private fun parseTime(s: String): Int {
         require(Regex("\\d{2}:\\d{2}").matches(s)) { "时间请使用 HH:mm 格式" }
@@ -187,15 +225,25 @@ class MainActivity : Activity() {
         val permissions = mutableListOf<String>()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        if (permissions.isNotEmpty()) { requestPermissions(permissions.toTypedArray(), 10); return }
+        if (permissions.isNotEmpty()) {
+            monitorStartPending=true; monitorStartDeadline=Long.MAX_VALUE
+            updateMonitoringControls()
+            requestPermissions(permissions.toTypedArray(), 10); return
+        }
         launchMonitor()
     }
-    private fun launchMonitor() { try { startForegroundService(Intent(this, MonitorService::class.java).putExtra(MonitorService.EXTRA_MODE,pendingMonitorMode.name)) } catch (e: Exception) { toast("无法启动：${e.message}") } }
+    private fun launchMonitor() {
+        try {
+            monitorStartPending=true; monitorStartDeadline=SystemClock.elapsedRealtime()+10000
+            startForegroundService(Intent(this, MonitorService::class.java).putExtra(MonitorService.EXTRA_MODE,pendingMonitorMode.name))
+        } catch (e: Exception) { monitorStartPending=false; toast("无法启动：${e.message}") }
+        updateMonitoringControls()
+    }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 10) {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) launchMonitor()
-            else toast("需要麦克风权限，请在系统应用设置中授权")
+            else { monitorStartPending=false; updateMonitoringControls(); toast("需要麦克风权限，请在系统应用设置中授权") }
         }
     }
     private fun calibrate() {
@@ -210,12 +258,51 @@ class MainActivity : Activity() {
     }
     private fun refreshRecords() {
         records.removeAllViews()
-        val list = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() }
+        val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         selectedRecordings.retainAll(list.map { it.name }.toSet())
-        if (list.isEmpty()) records.addView(TextView(this).apply { text = "暂无录音，触发后将在这里显示。" })
-        list.forEach { e ->
-            records.addView(CheckBox(this).apply { text="选择此录音"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
-            records.addView(Button(this).apply {
+        expandedSessions.retainAll(sessions.map { it.id }.toSet())
+        if(!recordGroupsInitialized) {
+            sessions.firstOrNull { session -> list.any { it.sessionId==session.id } }?.let { expandedSessions.add(it.id) }
+            recordGroupsInitialized=true
+        }
+        if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
+        fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
+            val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(12),dp(10),dp(16)); setBackgroundColor(Color.WHITE) }
+            records.addView(box,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
+            box.addView(TextView(this).apply { text=title; textSize=18f; setTextColor(Color.rgb(25,42,58)) })
+            if(session!=null) box.addView(TextView(this).apply { text="${rows.size} 段可用录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${session.status}"; setPadding(0,dp(8),0,dp(8)) })
+            if(session!=null) box.addView(Button(this).apply {
+                text="删除整个时段"; contentDescription="删除整个监听时段 ${session.id}"
+                setOnClickListener { confirmDeleteSession(session,rows.size) }
+            })
+            val audioList=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+            val expand=Button(this)
+            fun updateExpansion() {
+                val opened=session==null || session.id in expandedSessions
+                audioList.visibility=if(opened) View.VISIBLE else View.GONE
+                expand.text=if(opened) "收起录音（${rows.size} 段）" else "展开录音（${rows.size} 段）"
+            }
+            if(session!=null && rows.isNotEmpty()) {
+                expand.setOnClickListener { if(!expandedSessions.add(session.id)) expandedSessions.remove(session.id); updateExpansion() }
+                box.addView(expand)
+            }
+            box.addView(audioList)
+            if(rows.isEmpty()) box.addView(TextView(this).apply { text="暂无可用录音；此时段的声级与超限统计仍保留。" })
+            rows.forEach { addRecordingRow(audioList,it) }
+            updateExpansion()
+        }
+        sessions.forEach { session -> group(sessionTitle(session),list.filter { it.sessionId==session.id },session) }
+        val ids=sessions.map { it.id }.toSet()
+        val legacy=list.filter { it.sessionId==null || it.sessionId !in ids }
+        if(legacy.isNotEmpty()) group("未归属监听时段的录音",legacy,null)
+    }
+    private fun sessionTitle(session: MonitorSession): String {
+        val formatter=java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
+        return "监听时段 #${session.id}\n${formatter.format(java.time.Instant.ofEpochMilli(session.start))}\n至 ${formatter.format(java.time.Instant.ofEpochMilli(session.end))}"
+    }
+    private fun addRecordingRow(parent: LinearLayout, e: Evidence) {
+            parent.addView(CheckBox(this).apply { text="选择此录音"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
+            parent.addView(Button(this).apply {
                 text = "${e.name}\n${e.started}\n峰值 %.1f dB · %.1f 秒 · ${e.status}".format(e.peak, e.duration)
                 isAllCaps = false
                 setOnClickListener {
@@ -225,8 +312,22 @@ class MainActivity : Activity() {
                     catch (_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
                 }
             })
-            records.addView(Button(this).apply { text="删除这段录音"; setOnClickListener { confirmDelete(listOf(e.name)) } })
-        }
+            parent.addView(Button(this).apply { text="删除这段录音"; setOnClickListener { confirmDelete(listOf(e.name)) } })
+    }
+    private fun confirmDeleteSession(session: MonitorSession, count: Int) {
+        if(MonitorService.running || exporting) { toast("请先停止立即值守或取消预约，并等待其他任务完成"); return }
+        AlertDialog.Builder(this).setTitle("永久删除整个监听时段？")
+            .setMessage("${sessionTitle(session)}\n\n将删除此时段的全部录音（当前 $count 段可用）、录音索引、触发日志、声级曲线和超限统计。此操作不可撤销。已生成或导出的报告、音频副本需另外删除。")
+            .setNegativeButton("取消",null).setPositiveButton("删除整个时段") { _, _ ->
+                if(MonitorService.running || exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
+                exporting=true
+                Thread {
+                    var message="整个监听时段已删除"
+                    try { EvidenceStore(this).use { it.deleteSession(session.id) } }
+                    catch(e: Exception) { message="时段删除未完成：${e.message}；请刷新后检查，剩余记录保留" }
+                    finally { exporting=false; runOnUiThread { expandedSessions.remove(session.id); refreshRecords(); toast(message) } }
+                }.start()
+            }.show()
     }
     private fun confirmDelete(names: List<String>) {
         if(MonitorService.running || exporting) { toast("请先停止值守并等待导出或报告生成完成"); return }
@@ -381,7 +482,9 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
+        outState.putBoolean("monitorStartPending",monitorStartPending); outState.putLong("monitorStartDeadline",monitorStartDeadline)
         outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
+        outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("recordGroupsInitialized",recordGroupsInitialized)
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
         outState.putString("draftStart",start.text.toString()); outState.putString("draftEnd",end.text.toString())
         outState.putString("draftThreshold",threshold.text.toString()); outState.putString("draftOffset",offset.text.toString())

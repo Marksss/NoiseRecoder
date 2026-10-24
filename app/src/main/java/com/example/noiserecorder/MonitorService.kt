@@ -17,6 +17,8 @@ class MonitorService : Service() {
         const val STOP = "com.example.noiserecorder.STOP"
         const val EXTRA_MODE = "monitor_mode"
         @Volatile var running = false
+        @Volatile var activeMode: MonitorMode? = null
+            private set
         @Volatile var listening = false
         @Volatile var status = "未开启值守"
         @Volatile var currentDbfs = -120.0
@@ -33,6 +35,7 @@ class MonitorService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(NotificationChannel("monitor", "夜间监听", NotificationManager.IMPORTANCE_LOW))
             val mode = MonitorMode.fromValue(intent?.getStringExtra(EXTRA_MODE))
+            activeMode=mode
             status = if(mode==MonitorMode.IMMEDIATE) "正在开启立即值守" else "正在启用每日预约"
             startForeground(1, notification(status), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             wake = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NoiseRecorder:monitor").apply { acquire() }
@@ -168,7 +171,7 @@ class MonitorService : Service() {
             try { session?.close(finishReason) } catch (e: Exception) { status = "声级记录收尾失败：${e.message}" }
             try { releaseMicrophone() } catch (_: Exception) { }
             store.close()
-            alive.set(false); running = false
+            alive.set(false); running = false; activeMode=null
             wake?.let { if (it.isHeld) it.release() }; wake = null
             if (finishReason == "user_stop") status = "已停止值守并取消预约，录音已保存"
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
@@ -177,7 +180,7 @@ class MonitorService : Service() {
     override fun onDestroy() {
         alive.set(false)
         // A blocking read completes every ~100 ms; the worker owns audio/file cleanup.
-        if (worker == null) { wake?.let { if (it.isHeld) it.release() }; running = false }
+        if (worker == null) { wake?.let { if (it.isHeld) it.release() }; running = false; activeMode=null }
         super.onDestroy()
     }
 }
