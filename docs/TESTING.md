@@ -101,6 +101,10 @@ adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.e
 adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/record-deletion-test.txt
 ```
 
+### 1.4.1 默认收起
+
+1.4.1 默认收起调整：本地编译安装后，在 `FA7951A00460` 新启动应用进入记录页，确认没有自动展开的录音，点击可展开、再次点击可收起。旧录音分组同样默认收起；本轮未新增或重复运行单元测试，未操作用户音频删除。
+
 ## 标准构建与测试
 
 ```powershell

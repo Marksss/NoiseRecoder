@@ -45,7 +45,7 @@ class MainActivity : Activity() {
     private var pendingMonitorMode = MonitorMode.DAILY
     private val selectedRecordings = linkedSetOf<String>()
     private val expandedSessions = linkedSetOf<Long>()
-    private var recordGroupsInitialized=false
+    private var legacyRecordingsExpanded=false
     private var progressDialog: AlertDialog? = null
     private val ticker = object : Runnable {
         override fun run() {
@@ -70,7 +70,7 @@ class MainActivity : Activity() {
         monitorStartDeadline=savedInstanceState?.getLong("monitorStartDeadline") ?: 0L
         selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
         expandedSessions.addAll(savedInstanceState?.getLongArray("expandedSessions")?.toList() ?: emptyList())
-        recordGroupsInitialized=savedInstanceState?.getBoolean("recordGroupsInitialized") ?: false
+        legacyRecordingsExpanded=savedInstanceState?.getBoolean("legacyRecordingsExpanded") ?: false
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
         val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
@@ -261,10 +261,6 @@ class MainActivity : Activity() {
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         selectedRecordings.retainAll(list.map { it.name }.toSet())
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
-        if(!recordGroupsInitialized) {
-            sessions.firstOrNull { session -> list.any { it.sessionId==session.id } }?.let { expandedSessions.add(it.id) }
-            recordGroupsInitialized=true
-        }
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
         fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
             val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(12),dp(10),dp(16)); setBackgroundColor(Color.WHITE) }
@@ -278,12 +274,16 @@ class MainActivity : Activity() {
             val audioList=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
             val expand=Button(this)
             fun updateExpansion() {
-                val opened=session==null || session.id in expandedSessions
+                val opened=if(session==null) legacyRecordingsExpanded else session.id in expandedSessions
                 audioList.visibility=if(opened) View.VISIBLE else View.GONE
                 expand.text=if(opened) "收起录音（${rows.size} 段）" else "展开录音（${rows.size} 段）"
             }
-            if(session!=null && rows.isNotEmpty()) {
-                expand.setOnClickListener { if(!expandedSessions.add(session.id)) expandedSessions.remove(session.id); updateExpansion() }
+            if(rows.isNotEmpty()) {
+                expand.setOnClickListener {
+                    if(session==null) legacyRecordingsExpanded=!legacyRecordingsExpanded
+                    else if(!expandedSessions.add(session.id)) expandedSessions.remove(session.id)
+                    updateExpansion()
+                }
                 box.addView(expand)
             }
             box.addView(audioList)
@@ -484,7 +484,7 @@ class MainActivity : Activity() {
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
         outState.putBoolean("monitorStartPending",monitorStartPending); outState.putLong("monitorStartDeadline",monitorStartDeadline)
         outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
-        outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("recordGroupsInitialized",recordGroupsInitialized)
+        outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("legacyRecordingsExpanded",legacyRecordingsExpanded)
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
         outState.putString("draftStart",start.text.toString()); outState.putString("draftEnd",end.text.toString())
         outState.putString("draftThreshold",threshold.text.toString()); outState.putString("draftOffset",offset.text.toString())
