@@ -36,13 +36,18 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var exportKind = "zip"
     private var pendingReport: String? = null
+    private var pendingMonitorMode = MonitorMode.DAILY
     private val selectedRecordings = linkedSetOf<String>()
     private var progressDialog: AlertDialog? = null
     private val ticker = object : Runnable {
         override fun run() {
             val state = MonitorService.status
             if (status.text.toString() != state) status.text = state
-            val reading = if (MonitorService.running) String.format(Locale.US, "%.1f dB 估算值   /   %.1f dBFS", MonitorService.currentLevel, MonitorService.currentDbfs) else "声级：等待开启值守"
+            val reading = when {
+                MonitorService.listening -> String.format(Locale.US, "%.1f dB 估算值   /   %.1f dBFS", MonitorService.currentLevel, MonitorService.currentDbfs)
+                MonitorService.running -> "声级：预约待命，尚未采集声音"
+                else -> "声级：等待开启值守"
+            }
             if (level.text.toString() != reading) level.text = reading
             handler.postDelayed(this, 500)
         }
@@ -51,6 +56,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
         pendingReport = savedInstanceState?.getString("pendingReport")
+        pendingMonitorMode = MonitorMode.fromValue(savedInstanceState?.getString("pendingMonitorMode"))
         selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
@@ -85,11 +91,12 @@ class MainActivity : Activity() {
         status = label("", 18f); level = label("", 18f)
         scheduleSummary = label("", 16f)
         updateScheduleSummary()
-        button("开启每日值守") { startMonitoring() }
-        button("停止值守并保存录音") { stopService(Intent(this, MonitorService::class.java)) }
+        button("立即开启值守") { startMonitoring(MonitorMode.IMMEDIATE) }
+        button("预约每日值守") { startMonitoring(MonitorMode.DAILY) }
+        button("停止值守 / 取消预约") { stopService(Intent(this, MonitorService::class.java)) }
         button("查看录音记录") { selectTab(1) }
         button("调整监听设置") { selectTab(2) }
-        label("请先开启值守，再锁屏或充电。时段外丢弃声音；通知中也可停止值守。重启或强行停止后需重新开启。",14f)
+        label("立即值守：现在开始监听，手动停止才结束。\n每日预约：每天在已保存时段内监听，结束后停止采集并保存录音，等待下一天。停止按钮会取消预约。重启或强行停止后需重新开启。",14f)
 
         page(1)
         label("录音记录", 23f)
@@ -126,7 +133,7 @@ class MainActivity : Activity() {
         label("修改后请保存，再从首页开启值守。默认 02:30–06:00、阈值 45 dB。默认偏移 90 仅为占位值，未经校准不代表真实声压级；采用 100 ms RMS，无 A 计权，不能代替专业声级计。设置在下次开启值守时生效。", 13f)
         label("后台运行",19f)
         button("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        label("值守期间持续占用麦克风，监听时段外不保存声音。录音在时段结束时收尾。建议连接电源，并在系统电池设置中允许后台运行。",13f)
+        label("立即值守持续采集；每日预约在时段外释放麦克风，保留常驻通知等待下一次。预约时段结束会收尾录音。建议连接电源，并在系统电池设置中允许后台运行。",13f)
         label("数据管理",19f)
         button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
         button("仅导出声级记录 CSV") { chooseExport("csv") }
@@ -151,7 +158,7 @@ class MainActivity : Activity() {
     }
     private fun updateScheduleSummary() {
         val saved=MonitorSettings.load(this)
-        scheduleSummary.text="已保存计划：${clock(saved.start)}—${clock(saved.end)}\n触发阈值：${ReportFormat.number(saved.threshold)} dB（需校准）"
+        scheduleSummary.text="每日预约时段：${clock(saved.start)}—${clock(saved.end)}\n触发阈值：${ReportFormat.number(saved.threshold)} dB（需校准）\n立即值守不受预约时段限制"
     }
     private fun label(text: String, size: Float): TextView = TextView(this).apply { this.text = text; textSize = size; setTextColor(Color.rgb(25, 42, 58)); setPadding(0, 10, 0, 10); content.addView(this) }
     private fun field(title: String, value: String, number: Boolean = false): EditText {
@@ -172,9 +179,10 @@ class MainActivity : Activity() {
         require(s.offset.isFinite() && s.offset in -20.0..160.0) { "偏移范围为 -20–160 dB" }
         s.save(this); updateScheduleSummary(); toast("设置已保存，下次开启值守生效"); true
     } catch (e: Exception) { toast(e.message ?: "设置无效"); false }
-    private fun startMonitoring() {
+    private fun startMonitoring(mode: MonitorMode) {
         if (exporting) { toast("请等待导出完成"); return }
-        if (MonitorService.running) { toast("已经在值守中；修改设置后请停止并重新开启"); return }
+        if (MonitorService.running) { toast("请先停止当前值守或取消预约，再切换方式"); return }
+        pendingMonitorMode=mode
         updateScheduleSummary()
         val permissions = mutableListOf<String>()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.RECORD_AUDIO)
@@ -182,7 +190,7 @@ class MainActivity : Activity() {
         if (permissions.isNotEmpty()) { requestPermissions(permissions.toTypedArray(), 10); return }
         launchMonitor()
     }
-    private fun launchMonitor() { try { startForegroundService(Intent(this, MonitorService::class.java)) } catch (e: Exception) { toast("无法启动：${e.message}") } }
+    private fun launchMonitor() { try { startForegroundService(Intent(this, MonitorService::class.java).putExtra(MonitorService.EXTRA_MODE,pendingMonitorMode.name)) } catch (e: Exception) { toast("无法启动：${e.message}") } }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 10) {
@@ -372,6 +380,7 @@ class MainActivity : Activity() {
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
+        outState.putString("pendingMonitorMode",pendingMonitorMode.name)
         outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
         outState.putString("draftStart",start.text.toString()); outState.putString("draftEnd",end.text.toString())

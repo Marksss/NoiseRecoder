@@ -4,6 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AudioLogicTest {
+    @Test fun immediateModeIgnoresScheduledStartAndEnd() {
+        for(minute in listOf(0,149,150,359,360,720,1439))
+            assertTrue(MonitorMode.IMMEDIATE.shouldListen(minute,150,360))
+    }
+    @Test fun dailyModeReleasesOutsideWindowAndRepeatsAcrossMidnight() {
+        assertFalse(MonitorMode.DAILY.shouldListen(1379,1380,360))
+        assertTrue(MonitorMode.DAILY.shouldListen(1380,1380,360))
+        assertTrue(MonitorMode.DAILY.shouldListen(0,1380,360))
+        assertTrue(MonitorMode.DAILY.shouldListen(359,1380,360))
+        assertFalse(MonitorMode.DAILY.shouldListen(360,1380,360))
+        assertTrue(MonitorMode.DAILY.shouldListen(1380,1380,360))
+    }
+    @Test fun missingOrUnknownModeKeepsDailyCompatibility() {
+        assertEquals(MonitorMode.DAILY,MonitorMode.fromValue(null))
+        assertEquals(MonitorMode.DAILY,MonitorMode.fromValue("unknown"))
+        assertEquals(MonitorMode.IMMEDIATE,MonitorMode.fromValue("IMMEDIATE"))
+    }
     @Test fun scheduleHasExclusiveEndAndSupportsMidnight() {
         assertTrue(AudioLogic.inWindow(150, 150, 360))
         assertFalse(AudioLogic.inWindow(360, 150, 360))

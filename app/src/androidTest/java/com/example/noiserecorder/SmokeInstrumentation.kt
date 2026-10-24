@@ -34,7 +34,8 @@ class SmokeInstrumentation : Instrumentation() {
         settings.save(targetContext)
         activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         runOnMainSync { targetContext.startForegroundService(Intent(targetContext, MonitorService::class.java)) }
-        waitFor { MonitorService.running && MonitorService.currentDbfs > -120.0 }
+        val inside=LocalTime.now().let { AudioLogic.inWindow(it.hour*60+it.minute,settings.start,settings.end) }
+        waitFor { MonitorService.running && (if(inside) MonitorService.listening && MonitorService.currentDbfs > -120.0 else !MonitorService.listening) }
         SystemClock.sleep(1000)
     }
     override fun onStart() {
@@ -46,6 +47,7 @@ class SmokeInstrumentation : Instrumentation() {
             val now = LocalTime.now().let { it.hour * 60 + it.minute }
             launch(MonitorSettings((now + 10) % 1440, (now + 11) % 1440, 0.0, 160.0))
             SystemClock.sleep(3000)
+            check(!MonitorService.listening) { "Microphone active outside schedule" }
             check(store.list().none { it.name !in initial }) { "Outside-window recording created" }
             note("PASS: outside schedule does not save audio")
             val begin = (now + 1439) % 1440

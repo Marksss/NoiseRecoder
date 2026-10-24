@@ -64,6 +64,27 @@
 
 多份报告排序和多设备选择错误提示已有实现，本轮未额外构造多报告或连接多台真机；PowerShell 7 未单独运行。该脚本不依赖 Android 构建，因此本轮未重新编译 APK。
 
+## 1.3 两种值守方式验证
+
+2026-10-24 在设备 `FA7951A00460`（Android 11）安装 1.3.0，本地编译和 **14 项 JUnit 测试通过**。新增测试覆盖立即模式忽略预约时间、每日模式跨午夜及结束边界，以及旧启动方式兼容。
+
+`DutyModeInstrumentation` 专项检查共 **5 项 PASS、无 FAIL**：
+
+- 从首页“立即开启值守”启动，预约时段外实际采集并触发 WAV，锁屏继续运行，手动停止后保存为 `user_stop`。
+- 从首页“预约每日值守”启动，开始前不采集、不产生 WAV 或监听时段。
+- 锁屏等待设备实际时间 11:30 到点，自动开启麦克风并触发录音。
+- 11:31 时段结束后自动释放麦克风，WAV 和监听时段均以 `window_end` 收尾，文件头长度正确；预约服务继续等待次日。
+- 手动停止取消预约，麦克风和服务均停止。
+
+专项测试将新建的录音和声级时段清理，恢复测试前参数，原有录音、报告不变。它使用测试阈值 0 / 偏移 160 确保触发，不用于真实声级判断。每日次日重复和跨午夜分支由单元测试覆盖，本轮未等待到第二天；Android 14–16 后台预约行为仍需真机验证。本轮使用离线备用 APK 构建，未重新运行完整旧版录音/报告集成套件或标准 Gradle 构建。
+
+先停止设备已有的值守，再运行专项检查（测试期间会锁屏，最长约两分钟）：
+
+```powershell
+adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.example.noiserecorder.DutyModeInstrumentation
+adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/duty-mode-test.txt
+```
+
 ## 标准构建与测试
 
 ```powershell
@@ -86,7 +107,7 @@ adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/smoke-repo
 
 ## 离线备用流程
 
-`scripts/verify-local.ps1` 接收 `JavaHome`、`KotlinHome`、`AndroidJar`、`JUnitJar`、`HamcrestJar` 路径，编译源码并运行十一项测试。
+`scripts/verify-local.ps1` 接收 `JavaHome`、`KotlinHome`、`AndroidJar`、`JUnitJar`、`HamcrestJar` 路径，编译源码并运行十四项测试。
 
 `scripts/build-local-test-apk.ps1` 接收 `JavaHome`、`KotlinHome`、`SdkRoot`，默认使用 SDK 34 / Build Tools 33，生成：
 

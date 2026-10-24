@@ -3,6 +3,15 @@ package com.example.noiserecorder
 import kotlin.math.log10
 import kotlin.math.sqrt
 
+enum class MonitorMode {
+    IMMEDIATE, DAILY;
+    fun shouldListen(minute: Int, start: Int, end: Int) =
+        this == IMMEDIATE || AudioLogic.inWindow(minute, start, end)
+    companion object {
+        fun fromValue(value: String?) = values().firstOrNull { it.name == value } ?: DAILY
+    }
+}
+
 object AudioLogic {
     const val RATE = 16000
     fun inWindow(minute: Int, start: Int, end: Int): Boolean =
