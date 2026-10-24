@@ -4,13 +4,16 @@ import android.Manifest
 import android.app.*
 import android.content.*
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.*
 import android.provider.Settings
 import android.view.ViewGroup
 import android.view.View
+import android.view.Gravity
 import android.widget.*
 import java.io.File
 import java.security.MessageDigest
@@ -33,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var immediateStart: Button
     private lateinit var immediateStop: Button
     private lateinit var reportButton: Button
+    private lateinit var recordSummary: TextView
     private var monitorStartPending=false
     private var monitorStartDeadline=0L
     private var monitorStopPending=false
@@ -122,19 +126,26 @@ class MainActivity : Activity() {
         label("勾选预约：每天在已保存时段内监听，取消勾选会保存录音并取消预约。\n立即值守：现在开始监听，手动停止才结束。两种方式互斥，切换前先结束当前方式。重启或强行停止后需重新开启。",14f)
 
         page(1)
-        label("录音记录", 23f)
-        reportButton=button("生成所选时段报告（0）") { generateSelectedSessionReport() }
+        val recordsHeading=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
+        recordsHeading.addView(recordText("录音记录",23f),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
+        recordsHeading.addView(recordAction("刷新",outlined=false) { refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(recordsHeading)
+        label("勾选监听时段生成报告，展开后可回放或逐条删除录音。",13f)
+        reportButton=recordAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
-        label("先勾选下方的监听时段，再生成报告。报告包含所选时段的全部声级、超限记录和可用录音。",14f)
-        button("在手机浏览器打开 HTML 报告") { previewReport() }
-        button("导出报告…") {
+        content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
+        val reportActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        addRecordAction(reportActions,recordAction("预览报告") { previewReport() })
+        addRecordAction(reportActions,recordAction("导出报告") {
             AlertDialog.Builder(this).setTitle("选择报告格式")
                 .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
                 .setNegativeButton("取消",null).show()
-        }
-        button("删除本地所有已生成报告") { deleteReports() }
-        label("按实际监听时段分组；可删除整个时段，或展开后回放、删除单个录音。",14f)
-        button("刷新记录") { refreshRecords() }
+        })
+        addRecordAction(reportActions,recordAction("导出证据包") { chooseExport("zip") }.apply { contentDescription="导出证据包（原始 WAV + CSV + SHA-256）" })
+        content.addView(reportActions)
+        content.addView(recordAction("删除本地所有已生成报告",destructive=true,outlined=false) { deleteReports() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity=Gravity.END; topMargin=dp(4) })
+        recordSummary=recordText("",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) }
+        content.addView(recordSummary)
         records=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(records)
 
@@ -151,16 +162,6 @@ class MainActivity : Activity() {
         label("后台运行",19f)
         button("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
         label("立即值守持续采集；每日预约在时段外释放麦克风，保留常驻通知等待下一次。预约时段结束会收尾录音。建议连接电源，并在系统电池设置中允许后台运行。",13f)
-        label("数据管理",19f)
-        button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
-        button("仅导出声级记录 CSV") { chooseExport("csv") }
-        button("为旧版录音生成报告（无监听时段）") {
-            if(MonitorService.running || exporting) { toast("请先结束值守或预约并等待其他任务完成"); return@button }
-            val legacy=EvidenceStore(this).use { it.report(emptySet(),true).recordings.isNotEmpty() }
-            if(!legacy) { toast("没有未归属监听时段的旧版录音"); return@button }
-            generateReport(emptySet(),true)
-        }
-        label("报告以实际监听时段为准。旧录音无法补齐过去未采集的声级曲线。删除原始录音保留声级统计；已生成或导出的副本需单独删除。",13f)
         selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -188,6 +189,39 @@ class MainActivity : Activity() {
         return EditText(this).apply { setText(value); setSingleLine(); if (number) inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED; content.addView(this) }
     }
     private fun button(title: String, action: () -> Unit) = Button(this).apply { text = title; isAllCaps = false; setOnClickListener { action() }; content.addView(this) }
+    private fun recordText(value: String, size: Float, color: Int=Color.rgb(30,41,59)) = TextView(this).apply {
+        text=value; textSize=size; setTextColor(color)
+    }
+    private fun recordAction(title: String, primary: Boolean=false, destructive: Boolean=false, outlined: Boolean=true, action: () -> Unit) = Button(this).apply {
+        text=title; isAllCaps=false; textSize=14f; gravity=Gravity.CENTER
+        minHeight=dp(48); minimumHeight=dp(48); minWidth=0; minimumWidth=0
+        setPadding(dp(8),dp(6),dp(8),dp(6)); elevation=0f; stateListAnimator=null
+        setTextColor(if(primary) Color.WHITE else if(destructive) Color.rgb(168,52,52) else Color.rgb(28,100,160))
+        val shape=GradientDrawable().apply {
+            cornerRadius=dp(8).toFloat()
+            setColor(if(primary) Color.rgb(28,100,160) else if(outlined) Color.WHITE else Color.TRANSPARENT)
+            if(outlined && !primary) setStroke(dp(1),Color.rgb(220,227,235))
+        }
+        background=RippleDrawable(ColorStateList.valueOf(Color.argb(35,100,135,170)),shape,null)
+        setOnClickListener { action() }
+    }
+    private fun addRecordAction(row: LinearLayout, action: View) {
+        row.addView(action,LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f).apply {
+            if(row.childCount>0) marginStart=dp(8)
+        })
+    }
+    private fun recordStatus(value: String) = when(value) {
+        "recording" -> "录制中"
+        "monitoring" -> "监听中"
+        "complete" -> "已完成"
+        "user_stop" -> "已停止"
+        "window_end" -> "预约结束"
+        "interrupted" -> "意外中断"
+        "error" -> "异常结束"
+        "missing" -> "文件缺失"
+        "segment" -> "连续分段"
+        else -> "已结束"
+    }
     private fun updateMonitoringControls() {
         if(!::dailyReservation.isInitialized || !::immediateStart.isInitialized) return
         if(MonitorService.running || SystemClock.elapsedRealtime()>=monitorStartDeadline) monitorStartPending=false
@@ -259,16 +293,23 @@ class MainActivity : Activity() {
     private fun refreshRecords() {
         records.removeAllViews()
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
+        recordSummary.text="${sessions.size} 个监听时段 · ${list.size} 段录音"
         selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
         updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
         fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
-            val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(12),dp(10),dp(16)); setBackgroundColor(Color.WHITE) }
+            val box=LinearLayout(this).apply {
+                orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(12),dp(12),dp(8))
+                background=GradientDrawable().apply { cornerRadius=dp(10).toFloat(); setColor(Color.WHITE); setStroke(dp(1),Color.rgb(227,232,238)) }
+            }
             records.addView(box,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
-            box.addView(TextView(this).apply { text=title; textSize=18f; setTextColor(Color.rgb(25,42,58)) })
-            if(session!=null) box.addView(CheckBox(this).apply {
-                text="选择此时段生成报告"; contentDescription="选择报告时段 ${session.id}"
+            box.addView(recordText(title,17f))
+            if(session!=null) box.addView(recordText("${rows.size} 段录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${recordStatus(session.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(6),0,dp(4)) })
+            val controls=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
+            if(session!=null) addRecordAction(controls,CheckBox(this).apply {
+                text="选入报告"; textSize=14f; setTextColor(Color.rgb(51,65,85)); minHeight=dp(48)
+                contentDescription="选择报告时段 ${session.id}"
                 isChecked=session.id in selectedReportSessions
                 setOnClickListener {
                     if(isChecked) {
@@ -278,17 +319,13 @@ class MainActivity : Activity() {
                     updateReportButton()
                 }
             })
-            if(session!=null) box.addView(TextView(this).apply { text="${rows.size} 段可用录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${session.status}"; setPadding(0,dp(8),0,dp(8)) })
-            if(session!=null) box.addView(Button(this).apply {
-                text="删除整个时段"; contentDescription="删除整个监听时段 ${session.id}"
-                setOnClickListener { confirmDeleteSession(session,rows.size) }
-            })
             val audioList=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
-            val expand=Button(this)
+            val expand=recordAction("",outlined=false) { }
             fun updateExpansion() {
                 val opened=if(session==null) legacyRecordingsExpanded else session.id in expandedSessions
                 audioList.visibility=if(opened) View.VISIBLE else View.GONE
-                expand.text=if(opened) "收起录音（${rows.size} 段）" else "展开录音（${rows.size} 段）"
+                expand.text=if(opened) "收起录音" else "展开 ${rows.size} 段"
+                expand.contentDescription=if(opened) "收起录音（${rows.size} 段）" else "展开录音（${rows.size} 段）"
             }
             if(rows.isNotEmpty()) {
                 expand.setOnClickListener {
@@ -296,10 +333,12 @@ class MainActivity : Activity() {
                     else if(!expandedSessions.add(session.id)) expandedSessions.remove(session.id)
                     updateExpansion()
                 }
-                box.addView(expand)
+                addRecordAction(controls,expand)
             }
+            if(session!=null) addRecordAction(controls,recordAction("删除时段",destructive=true,outlined=false) { confirmDeleteSession(session,rows.size) }.apply { contentDescription="删除整个监听时段 ${session.id}" })
+            box.addView(controls)
             box.addView(audioList)
-            if(rows.isEmpty()) box.addView(TextView(this).apply { text="暂无可用录音；此时段的声级与超限统计仍保留。" })
+            if(rows.isEmpty()) box.addView(recordText("无录音，声级记录仍可用于报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
             rows.forEach { addRecordingRow(audioList,it) }
             updateExpansion()
         }
@@ -309,21 +348,32 @@ class MainActivity : Activity() {
         if(legacy.isNotEmpty()) group("未归属监听时段的录音",legacy,null)
     }
     private fun sessionTitle(session: MonitorSession): String {
-        val formatter=java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
-        return "监听时段 #${session.id}\n${formatter.format(java.time.Instant.ofEpochMilli(session.start))}\n至 ${formatter.format(java.time.Instant.ofEpochMilli(session.end))}"
+        val zone=java.time.ZoneId.systemDefault()
+        val start=java.time.Instant.ofEpochMilli(session.start).atZone(zone)
+        val end=java.time.Instant.ofEpochMilli(session.end).atZone(zone)
+        val date=java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+        val time=java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+        return if(start.toLocalDate()==end.toLocalDate()) "${start.format(date)}\n${start.format(time)} — ${end.format(time)}"
+            else "${start.format(date)} ${start.format(time)}\n至 ${end.format(date)} ${end.format(time)}"
     }
     private fun addRecordingRow(parent: LinearLayout, e: Evidence) {
-            parent.addView(Button(this).apply {
-                text = "${e.name}\n${e.started}\n峰值 %.1f dB · %.1f 秒 · ${e.status}".format(e.peak, e.duration)
-                isAllCaps = false
-                setOnClickListener {
-                    if (e.status == "recording") { toast("正在录音，停止值守后可回放"); return@setOnClickListener }
-                    val uri = Uri.parse("content://$packageName.evidence/${e.name}")
-                    try { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "audio/wav").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
-                    catch (_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
-                }
-            })
-            parent.addView(Button(this).apply { text="删除这段录音"; setOnClickListener { confirmDelete(listOf(e.name)) } })
+        parent.addView(View(this).apply { setBackgroundColor(Color.rgb(232,237,242)) },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(1)))
+        val row=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(0,dp(12),0,dp(10)) }
+        parent.addView(row)
+        val time=runCatching { java.time.Instant.parse(e.started).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")) }.getOrDefault(e.started)
+        row.addView(recordText("$time · ${String.format(Locale.US,"%.1f",e.duration)} 秒",16f))
+        row.addView(recordText("峰值 ${ReportFormat.number(e.peak)} dB · ${recordStatus(e.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
+        row.addView(recordText(e.name,12f,Color.rgb(100,116,139)).apply { setTextIsSelectable(true); maxLines=2 })
+        val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(0,dp(8),0,0) }
+        addRecordAction(actions,recordAction("播放") { playRecording(e) }.apply { contentDescription="播放录音 ${e.name}" })
+        addRecordAction(actions,recordAction("删除",destructive=true,outlined=false) { confirmDelete(listOf(e.name)) }.apply { contentDescription="删除录音 ${e.name}" })
+        row.addView(actions)
+    }
+    private fun playRecording(e: Evidence) {
+        if(e.status=="recording") { toast("正在录音，停止值守后可回放"); return }
+        val uri=Uri.parse("content://$packageName.evidence/${e.name}")
+        try { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri,"audio/wav").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+        catch(_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
     }
     private fun confirmDeleteSession(session: MonitorSession, count: Int) {
         if(MonitorService.running || exporting) { toast("请先停止立即值守或取消预约，并等待其他任务完成"); return }
