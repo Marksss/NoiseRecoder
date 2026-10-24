@@ -11,6 +11,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import java.io.File
 import java.time.Instant
+import java.util.zip.ZipFile
 
 /** Creates isolated fixtures; never deletes pre-existing user periods or recordings. */
 class RecordDeletionInstrumentation : Instrumentation() {
@@ -34,8 +35,8 @@ class RecordDeletionInstrumentation : Instrumentation() {
         return false
     }
     private fun dialogClick(text: String) {
-        waitFor { uiAutomation.rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.any { it.text?.toString()==text && it.isClickable }==true }
-        val node=uiAutomation.rootInActiveWindow.findAccessibilityNodeInfosByText(text).first { it.text?.toString()==text && it.isClickable }
+        waitFor { uiAutomation.rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.any { it.text?.toString()?.equals(text,ignoreCase=true)==true && it.isClickable }==true }
+        val node=uiAutomation.rootInActiveWindow.findAccessibilityNodeInfosByText(text).first { it.text?.toString()?.equals(text,ignoreCase=true)==true && it.isClickable }
         check(node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
     }
     private fun fixture(store: EvidenceStore, count: Int): Long {
@@ -69,8 +70,29 @@ class RecordDeletionInstrumentation : Instrumentation() {
         val existing=store.list().map { it.name }.toSet()
         val existingSessions=store.sessions().map { it.id }.toSet()
         val snapshot=File(targetContext.cacheDir,"delete-fixture-snapshot-${java.util.UUID.randomUUID()}.wav")
+        val reportPreferences=targetContext.getSharedPreferences("reports",Activity.MODE_PRIVATE)
+        val previousLatest=reportPreferences.getString("latest",null)
+        var generatedReport: File?=null
         try {
             val first=fixture(store,2); val other=fixture(store,1)
+            val reportActivity=startActivitySync(Intent(targetContext,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            runOnMainSync {
+                check(clickTab(reportActivity.window.decorView))
+                checkNotNull(find(reportActivity.window.decorView,"选择报告时段 $first")).performClick()
+                checkNotNull(find(reportActivity.window.decorView,"生成所选时段报告")).performClick()
+            }
+            dialogClick("生成 Word 和 HTML")
+            waitFor { reportPreferences.getString("latest",null)!=previousLatest }
+            val reportRoot=File(targetContext.filesDir,"reports/${reportPreferences.getString("latest",null)}")
+            check(File(reportRoot,"READY").isFile)
+            val html=File(reportRoot,"report.html").readText()
+            check(names.getValue(first).all { html.contains(it) } && names.getValue(other).none { html.contains(it) })
+            generatedReport=reportRoot
+            ZipFile(File(reportRoot,"report.docx")).use { zip ->
+                val xml=zip.getInputStream(zip.getEntry("word/document.xml")).bufferedReader().readText()
+                check(names.getValue(first).all { xml.contains(it) } && names.getValue(other).none { xml.contains(it) })
+            }
+            note("PASS: selecting a period generates Word/HTML with all its audio and excludes other periods; no audio checkbox required")
             val firstFile=names.getValue(first)[0]
             File(store.directory,firstFile).copyTo(snapshot)
             store.deleteRecording(firstFile)
@@ -109,6 +131,15 @@ class RecordDeletionInstrumentation : Instrumentation() {
             success=true
         } catch(e: Throwable) { note("FAIL: ${e.stackTraceToString()}") }
         finally {
+            generatedReport?.let { root ->
+                check(root.canonicalFile.parentFile==File(targetContext.filesDir,"reports").canonicalFile)
+                if(reportPreferences.getString("latest",null)==root.name) {
+                    val edit=reportPreferences.edit()
+                    if(previousLatest==null) edit.remove("latest") else edit.putString("latest",previousLatest)
+                    edit.commit()
+                }
+                root.deleteRecursively()
+            }
             for(id in fixtures) {
                 if(count(store,"sessions","id",id)>0) {
                     store.writableDatabase.execSQL("UPDATE sessions SET status='complete' WHERE id=?",arrayOf(id))

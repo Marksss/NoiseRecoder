@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var dailyReservation: CheckBox
     private lateinit var immediateStart: Button
     private lateinit var immediateStop: Button
+    private lateinit var reportButton: Button
     private var monitorStartPending=false
     private var monitorStartDeadline=0L
     private var monitorStopPending=false
@@ -44,6 +45,7 @@ class MainActivity : Activity() {
     private var pendingReport: String? = null
     private var pendingMonitorMode = MonitorMode.DAILY
     private val selectedRecordings = linkedSetOf<String>()
+    private val selectedReportSessions = linkedSetOf<Long>()
     private val expandedSessions = linkedSetOf<Long>()
     private var legacyRecordingsExpanded=false
     private var progressDialog: AlertDialog? = null
@@ -69,6 +71,7 @@ class MainActivity : Activity() {
         monitorStartPending=savedInstanceState?.getBoolean("monitorStartPending") ?: false
         monitorStartDeadline=savedInstanceState?.getLong("monitorStartDeadline") ?: 0L
         selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
+        selectedReportSessions.addAll(savedInstanceState?.getLongArray("selectedReportSessions")?.toList() ?: emptyList())
         expandedSessions.addAll(savedInstanceState?.getLongArray("expandedSessions")?.toList() ?: emptyList())
         legacyRecordingsExpanded=savedInstanceState?.getBoolean("legacyRecordingsExpanded") ?: false
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
@@ -122,7 +125,9 @@ class MainActivity : Activity() {
 
         page(1)
         label("录音记录", 23f)
-        button("选择监听时段并生成报告") { selectReportSessions() }
+        reportButton=button("生成所选时段报告（0）") { generateSelectedSessionReport() }
+        reportButton.contentDescription="生成所选时段报告"
+        label("先勾选下方的监听时段，再生成报告。报告包含所选时段的全部声级、超限记录和可用录音。",14f)
         button("在手机浏览器打开 HTML 报告") { previewReport() }
         button("导出报告…") {
             AlertDialog.Builder(this).setTitle("选择报告格式")
@@ -132,7 +137,7 @@ class MainActivity : Activity() {
         label("按实际监听时段分组；可删除整个时段，或展开后回放、勾选和删除单个录音。",14f)
         val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
         fun recordAction(title: String, action: () -> Unit) { actions.addView(Button(this).apply { text=title; isAllCaps=false; setOnClickListener { action() } },LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f)) }
-        recordAction("全选 / 取消") {
+        recordAction("全选/取消录音") {
             val names=EvidenceStore(this).use { it.list().map { e -> e.name } }
             if(selectedRecordings.size==names.size) selectedRecordings.clear() else selectedRecordings.addAll(names)
             refreshRecords()
@@ -160,6 +165,12 @@ class MainActivity : Activity() {
         button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
         button("仅导出声级记录 CSV") { chooseExport("csv") }
         button("删除已生成的报告副本") { deleteReports() }
+        button("为旧版录音生成报告（无监听时段）") {
+            if(MonitorService.running || exporting) { toast("请先结束值守或预约并等待其他任务完成"); return@button }
+            val legacy=EvidenceStore(this).use { it.report(emptySet(),true).recordings.isNotEmpty() }
+            if(!legacy) { toast("没有未归属监听时段的旧版录音"); return@button }
+            generateReport(emptySet(),true)
+        }
         label("报告以实际监听时段为准。旧录音无法补齐过去未采集的声级曲线。删除原始录音保留声级统计；已生成或导出的副本需单独删除。",13f)
         selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
     }
@@ -260,12 +271,25 @@ class MainActivity : Activity() {
         records.removeAllViews()
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         selectedRecordings.retainAll(list.map { it.name }.toSet())
+        selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
+        updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
         fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
             val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(12),dp(10),dp(16)); setBackgroundColor(Color.WHITE) }
             records.addView(box,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
             box.addView(TextView(this).apply { text=title; textSize=18f; setTextColor(Color.rgb(25,42,58)) })
+            if(session!=null) box.addView(CheckBox(this).apply {
+                text="选择此时段生成报告"; contentDescription="选择报告时段 ${session.id}"
+                isChecked=session.id in selectedReportSessions
+                setOnClickListener {
+                    if(isChecked) {
+                        if(selectedReportSessions.size>=31) { isChecked=false; toast("一次最多选择 31 个监听时段") }
+                        else selectedReportSessions.add(session.id)
+                    } else selectedReportSessions.remove(session.id)
+                    updateReportButton()
+                }
+            })
             if(session!=null) box.addView(TextView(this).apply { text="${rows.size} 段可用录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${session.status}"; setPadding(0,dp(8),0,dp(8)) })
             if(session!=null) box.addView(Button(this).apply {
                 text="删除整个时段"; contentDescription="删除整个监听时段 ${session.id}"
@@ -301,7 +325,7 @@ class MainActivity : Activity() {
         return "监听时段 #${session.id}\n${formatter.format(java.time.Instant.ofEpochMilli(session.start))}\n至 ${formatter.format(java.time.Instant.ofEpochMilli(session.end))}"
     }
     private fun addRecordingRow(parent: LinearLayout, e: Evidence) {
-            parent.addView(CheckBox(this).apply { text="选择此录音"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
+            parent.addView(CheckBox(this).apply { text="选择此录音（仅用于删除）"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
             parent.addView(Button(this).apply {
                 text = "${e.name}\n${e.started}\n峰值 %.1f dB · %.1f 秒 · ${e.status}".format(e.peak, e.duration)
                 isAllCaps = false
@@ -350,20 +374,21 @@ class MainActivity : Activity() {
         val file=File(base,value).canonicalFile
         return file.takeIf { it.parentFile==base && File(it,"READY").isFile }
     }
-    private fun selectReportSessions() {
+    private fun updateReportButton() {
+        if(::reportButton.isInitialized) reportButton.text="生成所选时段报告（${selectedReportSessions.size}）"
+    }
+    private fun generateSelectedSessionReport() {
         if(MonitorService.running || exporting) { toast("请先停止值守并等待其他任务完成"); return }
         val sessions=EvidenceStore(this).use { it.recover(); it.sessions() }
-        val legacy=EvidenceStore(this).use { it.report(emptySet(),true).recordings.isNotEmpty() }
-        val labels=sessions.map { "${java.time.Instant.ofEpochMilli(it.start).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()} — ${java.time.Instant.ofEpochMilli(it.end).atZone(java.time.ZoneId.systemDefault()).toLocalTime()}\n阈值 ${it.threshold} dB · ${it.status}" }.toMutableList()
-        if(legacy) labels.add("旧版本录音（无完整监听时段及声级曲线）")
-        if(labels.isEmpty()) { toast("暂无监听时段，请先开启值守采集声音"); return }
-        val checked=BooleanArray(labels.size).apply { this[0]=true }
-        AlertDialog.Builder(this).setTitle("选择报告时段（最多 31 个）").setMultiChoiceItems(labels.toTypedArray(),checked) { _,i,value -> checked[i]=value }
+        selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
+        updateReportButton()
+        val chosen=sessions.filter { it.id in selectedReportSessions }
+        if(chosen.isEmpty()) { toast("请先勾选监听时段；录音文件的勾选仅用于删除"); return }
+        val ids=chosen.map { it.id }.toSet()
+        AlertDialog.Builder(this).setTitle("生成 ${chosen.size} 个监听时段的报告？")
+            .setMessage(chosen.joinToString("\n\n") { sessionTitle(it) }+"\n\n将包含这些时段的全部声级、超限统计和可用录音；音频文件的勾选不影响报告范围。")
             .setNegativeButton("取消",null).setPositiveButton("生成 Word 和 HTML") { _, _ ->
-                val ids=sessions.filterIndexed { i, _ -> checked[i] }.map { it.id }.toSet()
-                val includeLegacy=legacy && checked.last()
-                if(ids.size>31 || (ids.isEmpty() && !includeLegacy)) { toast("请选择 1–31 个时段，或选择旧版本录音"); return@setPositiveButton }
-                generateReport(ids,includeLegacy)
+                generateReport(ids,false)
             }.show()
     }
     private fun generateReport(ids: Set<Long>, legacy: Boolean) {
@@ -484,6 +509,7 @@ class MainActivity : Activity() {
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
         outState.putBoolean("monitorStartPending",monitorStartPending); outState.putLong("monitorStartDeadline",monitorStartDeadline)
         outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
+        outState.putLongArray("selectedReportSessions",selectedReportSessions.toLongArray())
         outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("legacyRecordingsExpanded",legacyRecordingsExpanded)
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
         outState.putString("draftStart",start.text.toString()); outState.putString("draftEnd",end.text.toString())
