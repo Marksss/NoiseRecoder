@@ -64,7 +64,7 @@ class RecordDeletionInstrumentation : Instrumentation() {
         }
     }
     override fun onStart() {
-        if(MonitorService.running) { finish(Activity.RESULT_CANCELED,Bundle().apply { putString("stream","FAIL: stop monitoring or cancel reservation first") }); return }
+        if(MonitorService.running || DailyReservation.enabled(targetContext)) { finish(Activity.RESULT_CANCELED,Bundle().apply { putString("stream","FAIL: stop monitoring or cancel reservation first") }); return }
         var success=false
         val store=EvidenceStore(targetContext)
         val existing=store.list().map { it.name }.toSet()

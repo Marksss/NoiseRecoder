@@ -29,7 +29,7 @@ class MonitorService : Service() {
     private var wake: PowerManager.WakeLock? = null
     override fun onBind(intent: Intent?) = null
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == STOP) { alive.set(false); stopSelf(); return START_NOT_STICKY }
+        if (intent?.action == STOP) { DailyReservation.cancel(this); alive.set(false); stopSelf(); return START_NOT_STICKY }
         if (alive.get()) return START_NOT_STICKY
         try {
             val manager = getSystemService(NotificationManager::class.java)
@@ -38,6 +38,7 @@ class MonitorService : Service() {
             activeMode=mode
             status = if(mode==MonitorMode.IMMEDIATE) "正在开启立即值守" else "正在启用每日预约"
             startForeground(1, notification(status), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            if(mode==MonitorMode.DAILY) DailyReservation.enable(this) else DailyReservation.cancel(this)
             wake = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NoiseRecorder:monitor").apply { acquire() }
             alive.set(true); running = true
             worker = Thread({ monitor(mode) }, "noise-audio").apply { start() }
@@ -175,6 +176,7 @@ class MonitorService : Service() {
             wake?.let { if (it.isHeld) it.release() }; wake = null
             if (finishReason == "user_stop") status = "已停止值守并取消预约，录音已保存"
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+            if(mode==MonitorMode.DAILY) DailyReservation.notifyRestore(this)
         }
     }
     override fun onDestroy() {

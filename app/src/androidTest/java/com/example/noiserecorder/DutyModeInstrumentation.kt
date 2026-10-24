@@ -23,7 +23,7 @@ class DutyModeInstrumentation : Instrumentation() {
         val until=SystemClock.elapsedRealtime()+timeout
         while(!condition()) { check(SystemClock.elapsedRealtime()<until) { "Timeout: ${MonitorService.status}" }; SystemClock.sleep(100) }
     }
-    private fun stop() { targetContext.stopService(Intent(targetContext,MonitorService::class.java)); waitFor { !MonitorService.running } }
+    private fun stop() { DailyReservation.cancel(targetContext); targetContext.stopService(Intent(targetContext,MonitorService::class.java)); waitFor { !MonitorService.running } }
     private fun findButton(view: View, text: String): Button? {
         if(view is Button && view.text.toString()==text) return view
         if(view is ViewGroup) for(i in 0 until view.childCount) findButton(view.getChildAt(i),text)?.let { return it }
@@ -38,7 +38,7 @@ class DutyModeInstrumentation : Instrumentation() {
         waitFor { MonitorService.running }
     }
     override fun onStart() {
-        if(MonitorService.running) {
+        if(MonitorService.running || DailyReservation.enabled(targetContext)) {
             note("FAIL: stop existing monitoring before running this test")
             finish(Activity.RESULT_CANCELED,Bundle().apply { putString("stream",log.toString()); putBoolean("success",false) })
             return

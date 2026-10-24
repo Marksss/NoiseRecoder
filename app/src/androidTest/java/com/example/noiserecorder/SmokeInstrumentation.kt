@@ -25,6 +25,7 @@ class SmokeInstrumentation : Instrumentation() {
         sendStatus(0, Bundle().apply { putString("stream", "$message\n") })
     }
     private fun stopMonitor() {
+        DailyReservation.cancel(targetContext)
         targetContext.stopService(Intent(targetContext, MonitorService::class.java))
         waitFor { !MonitorService.running }
     }

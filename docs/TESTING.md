@@ -126,6 +126,25 @@ adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/record-del
 - ADB 界面检查确认设置页不再出现数据管理入口；记录页证据导出可打开 ZIP 保存界面并取消；默认收起、展开后播放/删除按钮存在。已视觉检查设置页、记录页收起和展开截图，无文字遮挡或按钮重叠。
 - 本轮没有重新运行单元测试、完整旧版集成套件或标准 Gradle 构建；未实际播放用户录音，也未通过界面删除已有记录。
 
+## 1.7 统一样式、并发报告与预约恢复
+
+- 首页、设置页与记录页共用白色描边卡片、按钮及文字样式。首页分组显示状态、预约和立即值守；设置采用并排时间/数值输入，禁用操作显示灰色。已检查首页及设置页上下部分截图，保存原参数后值保持不变。
+- 本地备用构建成功，14 项 JUnit 测试通过；安装到 `FA7951A00460`（Android 11）。标准 Gradle / Lint、Android 14–16 尚未验证。
+- `HistoricalReportInstrumentation` **5 项 PASS、无 FAIL**：真实麦克风采集并写入 WAV 时生成历史报告，检查当前时段不可选、当前文件继续增长、文件头未被修复、数据库仍为 monitoring / recording；Word 和 HTML 仅含历史音频，Word 导出也不停止监听。测试恢复原参数、原报告指针，清理自身音频和时段，原数据集合保持不变。
+- `ReservationRecoveryInstrumentation` **5 项 PASS、无 FAIL**：模拟开机回调，覆盖时段前恢复定时等待及静默通知、打开应用直接待命且不弹窗；时段内需弹窗手动确认，确认后实际启用麦克风；取消预约后不恢复。测试使用无法触发录音的阈值，仅创建并清理自己的短监听时段。
+- 完成一次最终规则下的真实重启，启动次数从 4 变为 5：预约 enabled 状态保留，系统边界提醒闹钟重新注册，开机未启动麦克风服务；系统通知记录确认等待通知已发布。随后打开应用，不弹恢复确认，直接进入每日预约待命，显示未采集声音。
+- 测试前确认原设备只在预约等待，才临时取消预约升级；测试结束已恢复原每日预约 02:30—06:00、阈值 45、偏移 90。立即值守不做开机恢复。系统限制开机后台启用麦克风，因此未打开应用的恢复等待到点后通过通知提示用户开启；已从应用恢复的待命服务正常自动监听。
+- Android 12+ 没有精确闹钟能力时使用系统允许的非精确定时提醒，可能延后；该提醒用于恢复尚未运行的服务，不替代已运行值守服务的时段检查。
+
+先停止值守或取消预约，再运行新增专项测试：
+
+```powershell
+adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.example.noiserecorder.HistoricalReportInstrumentation
+adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.example.noiserecorder.ReservationRecoveryInstrumentation
+```
+
+原始结果保存在应用的 `files/historical-report-test.txt` 和 `files/reservation-recovery-test.txt`。实际重启及页面检查另使用 ADB 验证，设备重启不在 Instrumentation 内自动执行。
+
 ## 标准构建与测试
 
 ```powershell

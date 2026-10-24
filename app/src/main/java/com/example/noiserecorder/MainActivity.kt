@@ -8,6 +8,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.*
 import android.provider.Settings
@@ -35,11 +36,13 @@ class MainActivity : Activity() {
     private lateinit var dailyReservation: CheckBox
     private lateinit var immediateStart: Button
     private lateinit var immediateStop: Button
+    private lateinit var resumeReservation: Button
     private lateinit var reportButton: Button
     private lateinit var recordSummary: TextView
     private var monitorStartPending=false
     private var monitorStartDeadline=0L
     private var monitorStopPending=false
+    private var reservationResumeAttempted=false
     private val pages = mutableListOf<ScrollView>()
     private val tabs = mutableListOf<Button>()
     private var selectedTab = 0
@@ -54,11 +57,15 @@ class MainActivity : Activity() {
     private var progressDialog: AlertDialog? = null
     private val ticker = object : Runnable {
         override fun run() {
-            val state = MonitorService.status
+            val state = if(!MonitorService.running && DailyReservation.enabled(this@MainActivity)) {
+                if(DailyReservation.inWindow(this@MainActivity)) "预约时段已到 · 等待手动开启" else "预约已恢复 · 等待预约时段"
+            } else MonitorService.status
             if (status.text.toString() != state) status.text = state
             val reading = when {
                 MonitorService.listening -> String.format(Locale.US, "%.1f dB 估算值   /   %.1f dBFS", MonitorService.currentLevel, MonitorService.currentDbfs)
-                MonitorService.running -> "声级：预约待命，尚未采集声音"
+                MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY -> "声级：预约待命，尚未采集声音"
+                MonitorService.running -> "声级：正在启动监听"
+                DailyReservation.enabled(this@MainActivity) -> "声级：尚未采集声音"
                 else -> "声级：等待开启值守"
             }
             if (level.text.toString() != reading) level.text = reading
@@ -71,8 +78,6 @@ class MainActivity : Activity() {
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
         pendingReport = savedInstanceState?.getString("pendingReport")
         pendingMonitorMode = MonitorMode.fromValue(savedInstanceState?.getString("pendingMonitorMode"))
-        monitorStartPending=savedInstanceState?.getBoolean("monitorStartPending") ?: false
-        monitorStartDeadline=savedInstanceState?.getLong("monitorStartDeadline") ?: 0L
         selectedReportSessions.addAll(savedInstanceState?.getLongArray("selectedReportSessions")?.toList() ?: emptyList())
         expandedSessions.addAll(savedInstanceState?.getLongArray("expandedSessions")?.toList() ?: emptyList())
         legacyRecordingsExpanded=savedInstanceState?.getBoolean("legacyRecordingsExpanded") ?: false
@@ -104,64 +109,95 @@ class MainActivity : Activity() {
             pages[index].addView(content)
         }
         page(0)
-        label("监听首页", 23f)
-        label("自动监听 · 原始录音 · 本地保存", 14f)
-        status = label("", 18f); level = label("", 18f)
-        scheduleSummary = label("", 16f)
-        updateScheduleSummary()
+        pageHeading("监听首页","自动监听 · 原始录音 · 本地保存")
+        val liveCard=surface()
+        status=uiText("",18f)
+        level=uiText("",16f,Color.rgb(28,100,160)).apply { setPadding(0,dp(8),0,0) }
+        liveCard.addView(status); liveCard.addView(level)
+        val reservationCard=surface()
         dailyReservation=CheckBox(this).apply {
-            text="预约每日值守"; textSize=18f; setTextColor(Color.rgb(25,42,58)); minHeight=dp(48)
+            text="预约每日值守"; textSize=16f; setTextColor(Color.rgb(30,41,59)); minHeight=dp(48)
             setOnClickListener {
                 if(isChecked) startMonitoring(MonitorMode.DAILY)
-                else if(MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY) stopMonitoring()
+                else if(DailyReservation.enabled(this@MainActivity) || (MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY)) stopMonitoring()
                 updateMonitoringControls()
             }
-            content.addView(this)
         }
-        immediateStart=button("立即开启值守") { startMonitoring(MonitorMode.IMMEDIATE) }
-        immediateStop=button("停止立即值守") { stopMonitoring() }
+        reservationCard.addView(dailyReservation)
+        scheduleSummary=uiText("",14f,Color.rgb(100,116,139)).apply { setPadding(dp(4),dp(4),0,0) }
+        reservationCard.addView(scheduleSummary)
+        resumeReservation=uiAction("恢复预约监听") { startMonitoring(MonitorMode.DAILY) }
+        reservationCard.addView(resumeReservation,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8) })
+        updateScheduleSummary()
+        val immediateCard=surface()
+        immediateCard.addView(uiText("立即值守",17f))
+        immediateCard.addView(uiText("现在开始监听，手动停止后结束。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(6),0,dp(10)) })
+        val immediateActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        immediateStart=uiAction("立即开启值守",primary=true) { startMonitoring(MonitorMode.IMMEDIATE) }
+        immediateStop=uiAction("停止立即值守",destructive=true) { stopMonitoring() }
+        addAction(immediateActions,immediateStart); addAction(immediateActions,immediateStop)
+        immediateCard.addView(immediateActions)
         updateMonitoringControls()
-        button("查看录音记录") { selectTab(1) }
-        button("调整监听设置") { selectTab(2) }
-        label("勾选预约：每天在已保存时段内监听，取消勾选会保存录音并取消预约。\n立即值守：现在开始监听，手动停止才结束。两种方式互斥，切换前先结束当前方式。重启或强行停止后需重新开启。",14f)
+        val shortcuts=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        addAction(shortcuts,uiAction("查看录音记录") { selectTab(1) })
+        addAction(shortcuts,uiAction("调整监听设置") { selectTab(2) })
+        content.addView(shortcuts,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
+        content.addView(uiText("取消勾选会结束预约；两种方式互斥。重启后自动恢复预约等待，已进入时段时提示手动开启。锁屏监听建议连接电源。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(12),0,0) })
 
         page(1)
         val recordsHeading=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
-        recordsHeading.addView(recordText("录音记录",23f),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
-        recordsHeading.addView(recordAction("刷新",outlined=false) { refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
+        recordsHeading.addView(uiText("录音记录",23f),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
+        recordsHeading.addView(uiAction("刷新",outlined=false) { refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(recordsHeading)
-        label("勾选监听时段生成报告，展开后可回放或逐条删除录音。",13f)
-        reportButton=recordAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
+        label("历史时段可在值守期间生成报告，当前时段结束后可选入。",13f)
+        reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
         val reportActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        addRecordAction(reportActions,recordAction("预览报告") { previewReport() })
-        addRecordAction(reportActions,recordAction("导出报告") {
+        addAction(reportActions,uiAction("预览报告") { previewReport() })
+        addAction(reportActions,uiAction("导出报告") {
             AlertDialog.Builder(this).setTitle("选择报告格式")
                 .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
                 .setNegativeButton("取消",null).show()
         })
-        addRecordAction(reportActions,recordAction("导出证据包") { chooseExport("zip") }.apply { contentDescription="导出证据包（原始 WAV + CSV + SHA-256）" })
+        addAction(reportActions,uiAction("导出证据包") { chooseExport("zip") }.apply { contentDescription="导出证据包（原始 WAV + CSV + SHA-256）" })
         content.addView(reportActions)
-        content.addView(recordAction("删除本地所有已生成报告",destructive=true,outlined=false) { deleteReports() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity=Gravity.END; topMargin=dp(4) })
-        recordSummary=recordText("",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) }
+        content.addView(uiAction("删除本地所有已生成报告",destructive=true,outlined=false) { deleteReports() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity=Gravity.END; topMargin=dp(4) })
+        recordSummary=uiText("",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) }
         content.addView(recordSummary)
         records=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(records)
 
         page(2)
-        label("监听设置", 23f)
+        pageHeading("监听设置","修改后保存，下次启动值守或预约时生效。")
         val s = MonitorSettings.load(this)
-        start = field("监听开始（HH:mm）", savedInstanceState?.getString("draftStart") ?: clock(s.start))
-        end = field("监听结束（HH:mm，支持跨午夜）", savedInstanceState?.getString("draftEnd") ?: clock(s.end))
-        threshold = field("触发阈值（估算 dB SPL）", savedInstanceState?.getString("draftThreshold") ?: s.threshold.toString(), true)
-        offset = field("校准偏移（dB SPL = dBFS + 偏移）", savedInstanceState?.getString("draftOffset") ?: s.offset.toString(), true)
-        button("保存设置") { saveSettings() }
-        button("用参考声级校准") { calibrate() }
-        label("修改后请保存，再从首页开启值守。默认 02:30–06:00、阈值 45 dB。默认偏移 90 仅为占位值，未经校准不代表真实声压级；采用 100 ms RMS，无 A 计权，不能代替专业声级计。设置在下次开启值守时生效。", 13f)
-        label("后台运行",19f)
-        button("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        label("立即值守持续采集；每日预约在时段外释放麦克风，保留常驻通知等待下一次。预约时段结束会收尾录音。建议连接电源，并在系统电池设置中允许后台运行。",13f)
+        val timeCard=surface()
+        timeCard.addView(uiText("每日预约时段",17f))
+        val times=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(0,dp(10),0,0) }
+        val startColumn=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        val endColumn=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        addAction(times,startColumn); addAction(times,endColumn)
+        timeCard.addView(times)
+        start=field("开始（HH:mm）",savedInstanceState?.getString("draftStart") ?: clock(s.start),parent=startColumn)
+        end=field("结束（HH:mm）",savedInstanceState?.getString("draftEnd") ?: clock(s.end),parent=endColumn)
+        timeCard.addView(uiText("支持跨午夜，例如 22:00—06:00。",13f,Color.rgb(100,116,139)))
+        val triggerCard=surface()
+        triggerCard.addView(uiText("触发与校准",17f))
+        val inputs=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(0,dp(10),0,0) }
+        val thresholdColumn=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        val offsetColumn=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        addAction(inputs,thresholdColumn); addAction(inputs,offsetColumn)
+        triggerCard.addView(inputs)
+        threshold=field("触发阈值（dB）",savedInstanceState?.getString("draftThreshold") ?: s.threshold.toString(),true,thresholdColumn)
+        offset=field("校准偏移（dB）",savedInstanceState?.getString("draftOffset") ?: s.offset.toString(),true,offsetColumn)
+        triggerCard.addView(uiText("估算声级 = dBFS + 校准偏移。默认偏移 90 未经校准，仅供相对参考。",13f,Color.rgb(100,116,139)).apply { setPadding(0,0,0,dp(10)) })
+        triggerCard.addView(uiAction("用参考声级校准") { calibrate() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(uiAction("保存设置",primary=true) { saveSettings() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
+        content.addView(uiText("采用 100 ms RMS，未做 A 计权，不能代替专业声级计。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) })
+        val backgroundCard=surface()
+        backgroundCard.addView(uiText("后台运行",17f))
+        backgroundCard.addView(uiText("每日预约在时段外释放麦克风。重启后自动恢复预约等待；已到时段则提示手动开启。若一直未打开应用，到时可能需要点按通知启用麦克风。锁屏监听建议充电，并允许后台运行。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,dp(10)) })
+        backgroundCard.addView(uiAction("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
         selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -181,31 +217,57 @@ class MainActivity : Activity() {
     }
     private fun updateScheduleSummary() {
         val saved=MonitorSettings.load(this)
-        scheduleSummary.text="每日预约时段：${clock(saved.start)}—${clock(saved.end)}\n触发阈值：${ReportFormat.number(saved.threshold)} dB（需校准）\n立即值守不受预约时段限制"
+        scheduleSummary.text="${clock(saved.start)} — ${clock(saved.end)}\n触发阈值 ${ReportFormat.number(saved.threshold)} dB · 需校准"
     }
     private fun label(text: String, size: Float): TextView = TextView(this).apply { this.text = text; textSize = size; setTextColor(Color.rgb(25, 42, 58)); setPadding(0, 10, 0, 10); content.addView(this) }
-    private fun field(title: String, value: String, number: Boolean = false): EditText {
-        label(title, 14f)
-        return EditText(this).apply { setText(value); setSingleLine(); if (number) inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED; content.addView(this) }
+    private fun field(title: String, value: String, number: Boolean = false, parent: LinearLayout=content): EditText {
+        parent.addView(uiText(title,13f,Color.rgb(100,116,139)).apply { minHeight=dp(20) })
+        return EditText(this).apply {
+            setText(value); setSingleLine(); textSize=16f; setTextColor(Color.rgb(30,41,59))
+            minHeight=dp(48); setPadding(dp(12),dp(10),dp(12),dp(10))
+            if(number) inputType=android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            background=StateListDrawable().apply {
+                fun shape(focused: Boolean) = GradientDrawable().apply {
+                    cornerRadius=dp(8).toFloat(); setColor(Color.WHITE)
+                    setStroke(dp(if(focused) 2 else 1),if(focused) Color.rgb(28,100,160) else Color.rgb(220,227,235))
+                }
+                addState(intArrayOf(android.R.attr.state_focused),shape(true)); addState(intArrayOf(),shape(false))
+            }
+            parent.addView(this,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(4); bottomMargin=dp(10) })
+        }
     }
-    private fun button(title: String, action: () -> Unit) = Button(this).apply { text = title; isAllCaps = false; setOnClickListener { action() }; content.addView(this) }
-    private fun recordText(value: String, size: Float, color: Int=Color.rgb(30,41,59)) = TextView(this).apply {
+    private fun pageHeading(title: String, subtitle: String) {
+        content.addView(uiText(title,23f).apply { minHeight=dp(48); gravity=Gravity.CENTER_VERTICAL })
+        content.addView(uiText(subtitle,13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
+    }
+    private fun surface(parent: LinearLayout=content, bottom: Int=12): LinearLayout {
+        val card=LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(12),dp(12),dp(bottom))
+            background=GradientDrawable().apply { cornerRadius=dp(10).toFloat(); setColor(Color.WHITE); setStroke(dp(1),Color.rgb(227,232,238)) }
+        }
+        parent.addView(card,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
+        return card
+    }
+    private fun uiText(value: String, size: Float, color: Int=Color.rgb(30,41,59)) = TextView(this).apply {
         text=value; textSize=size; setTextColor(color)
     }
-    private fun recordAction(title: String, primary: Boolean=false, destructive: Boolean=false, outlined: Boolean=true, action: () -> Unit) = Button(this).apply {
+    private fun uiAction(title: String, primary: Boolean=false, destructive: Boolean=false, outlined: Boolean=true, action: () -> Unit) = Button(this).apply {
         text=title; isAllCaps=false; textSize=14f; gravity=Gravity.CENTER
         minHeight=dp(48); minimumHeight=dp(48); minWidth=0; minimumWidth=0
         setPadding(dp(8),dp(6),dp(8),dp(6)); elevation=0f; stateListAnimator=null
-        setTextColor(if(primary) Color.WHITE else if(destructive) Color.rgb(168,52,52) else Color.rgb(28,100,160))
+        setTextColor(ColorStateList(arrayOf(intArrayOf(-android.R.attr.state_enabled),intArrayOf()),intArrayOf(Color.rgb(148,163,184),if(primary) Color.WHITE else if(destructive) Color.rgb(168,52,52) else Color.rgb(28,100,160))))
         val shape=GradientDrawable().apply {
             cornerRadius=dp(8).toFloat()
             setColor(if(primary) Color.rgb(28,100,160) else if(outlined) Color.WHITE else Color.TRANSPARENT)
             if(outlined && !primary) setStroke(dp(1),Color.rgb(220,227,235))
         }
-        background=RippleDrawable(ColorStateList.valueOf(Color.argb(35,100,135,170)),shape,null)
+        background=StateListDrawable().apply {
+            addState(intArrayOf(-android.R.attr.state_enabled),GradientDrawable().apply { cornerRadius=dp(8).toFloat(); setColor(Color.rgb(238,242,246)) })
+            addState(intArrayOf(),RippleDrawable(ColorStateList.valueOf(Color.argb(35,100,135,170)),shape,null))
+        }
         setOnClickListener { action() }
     }
-    private fun addRecordAction(row: LinearLayout, action: View) {
+    private fun addAction(row: LinearLayout, action: View) {
         row.addView(action,LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f).apply {
             if(row.childCount>0) marginStart=dp(8)
         })
@@ -228,12 +290,16 @@ class MainActivity : Activity() {
         if(!MonitorService.running) monitorStopPending=false
         val running=MonitorService.running
         val daily=running && MonitorService.activeMode==MonitorMode.DAILY
-        dailyReservation.isChecked=!monitorStopPending && (daily || (monitorStartPending && pendingMonitorMode==MonitorMode.DAILY))
+        val reserved=DailyReservation.enabled(this)
+        dailyReservation.isChecked=!monitorStopPending && (reserved || daily || (monitorStartPending && pendingMonitorMode==MonitorMode.DAILY))
         dailyReservation.isEnabled=!monitorStartPending && !monitorStopPending && (!running || daily)
-        immediateStart.isEnabled=!running && !monitorStartPending && !monitorStopPending
+        immediateStart.isEnabled=!running && !reserved && !monitorStartPending && !monitorStopPending
         immediateStop.isEnabled=running && !daily && !monitorStopPending
+        resumeReservation.visibility=if(reserved && !running && DailyReservation.inWindow(this)) View.VISIBLE else View.GONE
+        resumeReservation.isEnabled=!monitorStartPending && !monitorStopPending
     }
     private fun stopMonitoring() {
+        DailyReservation.cancel(this)
         monitorStopPending=true
         stopService(Intent(this,MonitorService::class.java))
         updateMonitoringControls()
@@ -249,11 +315,12 @@ class MainActivity : Activity() {
         require(s.start != s.end) { "开始和结束时间不能相同" }
         require(s.threshold.isFinite() && s.threshold in 0.0..140.0) { "阈值范围为 0–140 dB" }
         require(s.offset.isFinite() && s.offset in -20.0..160.0) { "偏移范围为 -20–160 dB" }
-        s.save(this); updateScheduleSummary(); toast("设置已保存，下次开启值守生效"); true
+        s.save(this); updateScheduleSummary(); if(DailyReservation.enabled(this) && !MonitorService.running) DailyReservation.notifyRestore(this); toast("设置已保存，下次开启值守生效"); true
     } catch (e: Exception) { toast(e.message ?: "设置无效"); false }
     private fun startMonitoring(mode: MonitorMode) {
         if (exporting) { toast("请等待导出完成"); return }
         if (MonitorService.running) { toast("请先停止当前值守或取消预约，再切换方式"); return }
+        if(mode==MonitorMode.IMMEDIATE && DailyReservation.enabled(this)) { toast("请先取消每日预约，再开启立即值守"); return }
         pendingMonitorMode=mode
         updateScheduleSummary()
         val permissions = mutableListOf<String>()
@@ -294,23 +361,20 @@ class MainActivity : Activity() {
         records.removeAllViews()
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         recordSummary.text="${sessions.size} 个监听时段 · ${list.size} 段录音"
-        selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
+        selectedReportSessions.retainAll(sessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet())
         updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
         fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
-            val box=LinearLayout(this).apply {
-                orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(12),dp(12),dp(8))
-                background=GradientDrawable().apply { cornerRadius=dp(10).toFloat(); setColor(Color.WHITE); setStroke(dp(1),Color.rgb(227,232,238)) }
-            }
-            records.addView(box,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
-            box.addView(recordText(title,17f))
-            if(session!=null) box.addView(recordText("${rows.size} 段录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${recordStatus(session.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(6),0,dp(4)) })
+            val box=surface(records,bottom=8)
+            box.addView(uiText(title,17f))
+            if(session!=null) box.addView(uiText("${rows.size} 段录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${recordStatus(session.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(6),0,dp(4)) })
             val controls=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
-            if(session!=null) addRecordAction(controls,CheckBox(this).apply {
+            if(session!=null) addAction(controls,CheckBox(this).apply {
                 text="选入报告"; textSize=14f; setTextColor(Color.rgb(51,65,85)); minHeight=dp(48)
                 contentDescription="选择报告时段 ${session.id}"
                 isChecked=session.id in selectedReportSessions
+                isEnabled=session.status !in setOf("monitoring","deleting")
                 setOnClickListener {
                     if(isChecked) {
                         if(selectedReportSessions.size>=31) { isChecked=false; toast("一次最多选择 31 个监听时段") }
@@ -319,8 +383,9 @@ class MainActivity : Activity() {
                     updateReportButton()
                 }
             })
+            if(session?.status=="monitoring") box.addView(uiText("当前正在监听，时段结束后可选入报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
             val audioList=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
-            val expand=recordAction("",outlined=false) { }
+            val expand=uiAction("",outlined=false) { }
             fun updateExpansion() {
                 val opened=if(session==null) legacyRecordingsExpanded else session.id in expandedSessions
                 audioList.visibility=if(opened) View.VISIBLE else View.GONE
@@ -333,12 +398,12 @@ class MainActivity : Activity() {
                     else if(!expandedSessions.add(session.id)) expandedSessions.remove(session.id)
                     updateExpansion()
                 }
-                addRecordAction(controls,expand)
+                addAction(controls,expand)
             }
-            if(session!=null) addRecordAction(controls,recordAction("删除时段",destructive=true,outlined=false) { confirmDeleteSession(session,rows.size) }.apply { contentDescription="删除整个监听时段 ${session.id}" })
+            if(session!=null) addAction(controls,uiAction("删除时段",destructive=true,outlined=false) { confirmDeleteSession(session,rows.size) }.apply { contentDescription="删除整个监听时段 ${session.id}" })
             box.addView(controls)
             box.addView(audioList)
-            if(rows.isEmpty()) box.addView(recordText("无录音，声级记录仍可用于报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
+            if(rows.isEmpty()) box.addView(uiText("无录音，声级记录仍可用于报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
             rows.forEach { addRecordingRow(audioList,it) }
             updateExpansion()
         }
@@ -361,12 +426,12 @@ class MainActivity : Activity() {
         val row=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(0,dp(12),0,dp(10)) }
         parent.addView(row)
         val time=runCatching { java.time.Instant.parse(e.started).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")) }.getOrDefault(e.started)
-        row.addView(recordText("$time · ${String.format(Locale.US,"%.1f",e.duration)} 秒",16f))
-        row.addView(recordText("峰值 ${ReportFormat.number(e.peak)} dB · ${recordStatus(e.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
-        row.addView(recordText(e.name,12f,Color.rgb(100,116,139)).apply { setTextIsSelectable(true); maxLines=2 })
+        row.addView(uiText("$time · ${String.format(Locale.US,"%.1f",e.duration)} 秒",16f))
+        row.addView(uiText("峰值 ${ReportFormat.number(e.peak)} dB · ${recordStatus(e.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
+        row.addView(uiText(e.name,12f,Color.rgb(100,116,139)).apply { setTextIsSelectable(true); maxLines=2 })
         val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(0,dp(8),0,0) }
-        addRecordAction(actions,recordAction("播放") { playRecording(e) }.apply { contentDescription="播放录音 ${e.name}" })
-        addRecordAction(actions,recordAction("删除",destructive=true,outlined=false) { confirmDelete(listOf(e.name)) }.apply { contentDescription="删除录音 ${e.name}" })
+        addAction(actions,uiAction("播放") { playRecording(e) }.apply { contentDescription="播放录音 ${e.name}" })
+        addAction(actions,uiAction("删除",destructive=true,outlined=false) { confirmDelete(listOf(e.name)) }.apply { contentDescription="删除录音 ${e.name}" })
         row.addView(actions)
     }
     private fun playRecording(e: Evidence) {
@@ -415,12 +480,12 @@ class MainActivity : Activity() {
         if(::reportButton.isInitialized) reportButton.text="生成所选时段报告（${selectedReportSessions.size}）"
     }
     private fun generateSelectedSessionReport() {
-        if(MonitorService.running || exporting) { toast("请先停止值守并等待其他任务完成"); return }
-        val sessions=EvidenceStore(this).use { it.recover(); it.sessions() }
-        selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
+        if(exporting) { toast("请等待当前任务完成"); return }
+        val sessions=EvidenceStore(this).use { if(!MonitorService.running) it.recover(); it.sessions() }
+        selectedReportSessions.retainAll(sessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet())
         updateReportButton()
         val chosen=sessions.filter { it.id in selectedReportSessions }
-        if(chosen.isEmpty()) { toast("请先勾选需要生成报告的监听时段"); return }
+        if(chosen.isEmpty()) { toast("请先勾选已结束的历史监听时段"); return }
         val ids=chosen.map { it.id }.toSet()
         AlertDialog.Builder(this).setTitle("生成 ${chosen.size} 个监听时段的报告？")
             .setMessage(chosen.joinToString("\n\n") { sessionTitle(it) }+"\n\n将包含这些时段的全部声级、超限统计和可用录音，无需选择单个录音。")
@@ -429,7 +494,7 @@ class MainActivity : Activity() {
             }.show()
     }
     private fun generateReport(ids: Set<Long>, legacy: Boolean) {
-        if(MonitorService.running || exporting) { toast("请先结束当前任务"); return }
+        if(exporting) { toast("请等待当前任务完成"); return }
         exporting=true
         val progressLabel=TextView(this).apply { text="正在读取声级记录…"; setPadding(36,36,36,36) }
         val dialog=AlertDialog.Builder(this).setTitle("生成监测报告").setView(progressLabel).setCancelable(false).create()
@@ -439,6 +504,8 @@ class MainActivity : Activity() {
             try {
                 EvidenceStore(this).use { store ->
                     val report=store.report(ids,legacy)
+                    check(report.sessions.size==ids.size) { "所选监听时段已变更，请刷新后重新选择" }
+                    check(report.sessions.none { it.session.status in setOf("monitoring","deleting") } && report.recordings.none { it.evidence.status=="recording" }) { "只能生成已结束时段的报告，当前监听无需停止" }
                     ReportBuilder(report,store.directory).generate(root) { message -> runOnUiThread { if(!isFinishing && !isDestroyed) progressLabel.text=message } }
                 }
                 check(getSharedPreferences("reports",MODE_PRIVATE).edit().putString("latest",root.name).commit())
@@ -468,7 +535,7 @@ class MainActivity : Activity() {
     }
     private fun chooseReportExport(kind: String) {
         val root=reportFolder() ?: run { toast("请先生成报告"); return }
-        if(MonitorService.running || exporting) { toast("请先停止值守并等待其他任务完成"); return }
+        if(exporting) { toast("请等待当前任务完成"); return }
         exportKind=kind; pendingReport=root.name
         val extension=if(kind=="reportzip") "zip" else kind
         val mime=when(kind) { "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; "html" -> "text/html"; else -> "application/zip" }
@@ -502,7 +569,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode !in setOf(20,21) || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        if (MonitorService.running) { toast("值守已开启，请停止后重新导出"); return }
+        if (requestCode==20 && MonitorService.running) { toast("值守已开启，请停止后重新导出证据包"); return }
         exporting = true
         val kind = exportKind
         Thread {
@@ -544,7 +611,6 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
-        outState.putBoolean("monitorStartPending",monitorStartPending); outState.putLong("monitorStartDeadline",monitorStartDeadline)
         outState.putLongArray("selectedReportSessions",selectedReportSessions.toLongArray())
         outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("legacyRecordingsExpanded",legacyRecordingsExpanded)
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
@@ -552,7 +618,28 @@ class MainActivity : Activity() {
         outState.putString("draftThreshold",threshold.text.toString()); outState.putString("draftOffset",offset.text.toString())
         super.onSaveInstanceState(outState)
     }
-    override fun onResume() { super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords() }
+    private fun resumeSavedReservation() {
+        if(!reservationResumeAttempted && DailyReservation.enabled(this) && !MonitorService.running && !monitorStartPending && !exporting) {
+            reservationResumeAttempted=true
+            if(!DailyReservation.inWindow(this)) {
+                startMonitoring(MonitorMode.DAILY)
+                return
+            }
+            val saved=MonitorSettings.load(this)
+            AlertDialog.Builder(this).setTitle("恢复每日预约？")
+                .setMessage("已保留每日 ${clock(saved.start)}—${clock(saved.end)} 的预约。\n\n当前尚未开启后台监听，请手动恢复。开启后在预约时段内采集声音，时段外仅待命。")
+                .setPositiveButton("开启预约值守") { _, _ -> startMonitoring(MonitorMode.DAILY) }
+                .setNegativeButton("稍后",null).show()
+        }
+    }
+    override fun onResume() { super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords(); resumeSavedReservation() }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent); setIntent(intent)
+        if(intent.getBooleanExtra(DailyReservation.RESTORE,false)) {
+            reservationResumeAttempted=false
+            window.decorView.post { resumeSavedReservation() }
+        }
+    }
     override fun onPause() { handler.removeCallbacks(ticker); super.onPause() }
     override fun onDestroy() { progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }

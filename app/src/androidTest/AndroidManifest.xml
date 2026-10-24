@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <instrumentation android:name="com.example.noiserecorder.DutyModeInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Duty mode verification" />
     <instrumentation android:name="com.example.noiserecorder.RecordDeletionInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Record deletion verification" />
+    <instrumentation android:name="com.example.noiserecorder.HistoricalReportInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Historical report verification" />
+    <instrumentation android:name="com.example.noiserecorder.ReservationRecoveryInstrumentation" android:targetPackage="com.example.noiserecorder" android:label="Reservation recovery verification" />
 </manifest>
