@@ -44,7 +44,6 @@ class MainActivity : Activity() {
     private var exportKind = "zip"
     private var pendingReport: String? = null
     private var pendingMonitorMode = MonitorMode.DAILY
-    private val selectedRecordings = linkedSetOf<String>()
     private val selectedReportSessions = linkedSetOf<Long>()
     private val expandedSessions = linkedSetOf<Long>()
     private var legacyRecordingsExpanded=false
@@ -70,7 +69,6 @@ class MainActivity : Activity() {
         pendingMonitorMode = MonitorMode.fromValue(savedInstanceState?.getString("pendingMonitorMode"))
         monitorStartPending=savedInstanceState?.getBoolean("monitorStartPending") ?: false
         monitorStartDeadline=savedInstanceState?.getLong("monitorStartDeadline") ?: 0L
-        selectedRecordings.addAll(savedInstanceState?.getStringArrayList("selectedRecordings") ?: emptyList())
         selectedReportSessions.addAll(savedInstanceState?.getLongArray("selectedReportSessions")?.toList() ?: emptyList())
         expandedSessions.addAll(savedInstanceState?.getLongArray("expandedSessions")?.toList() ?: emptyList())
         legacyRecordingsExpanded=savedInstanceState?.getBoolean("legacyRecordingsExpanded") ?: false
@@ -134,17 +132,9 @@ class MainActivity : Activity() {
                 .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
                 .setNegativeButton("取消",null).show()
         }
-        label("按实际监听时段分组；可删除整个时段，或展开后回放、勾选和删除单个录音。",14f)
-        val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        fun recordAction(title: String, action: () -> Unit) { actions.addView(Button(this).apply { text=title; isAllCaps=false; setOnClickListener { action() } },LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f)) }
-        recordAction("全选/取消录音") {
-            val names=EvidenceStore(this).use { it.list().map { e -> e.name } }
-            if(selectedRecordings.size==names.size) selectedRecordings.clear() else selectedRecordings.addAll(names)
-            refreshRecords()
-        }
-        recordAction("删除选中") { confirmDelete(selectedRecordings.toList()) }
-        recordAction("刷新") { refreshRecords() }
-        content.addView(actions)
+        button("删除本地所有已生成报告") { deleteReports() }
+        label("按实际监听时段分组；可删除整个时段，或展开后回放、删除单个录音。",14f)
+        button("刷新记录") { refreshRecords() }
         records=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(records)
 
@@ -164,7 +154,6 @@ class MainActivity : Activity() {
         label("数据管理",19f)
         button("导出证据包（原始 WAV + CSV + SHA-256）") { chooseExport("zip") }
         button("仅导出声级记录 CSV") { chooseExport("csv") }
-        button("删除已生成的报告副本") { deleteReports() }
         button("为旧版录音生成报告（无监听时段）") {
             if(MonitorService.running || exporting) { toast("请先结束值守或预约并等待其他任务完成"); return@button }
             val legacy=EvidenceStore(this).use { it.report(emptySet(),true).recordings.isNotEmpty() }
@@ -270,7 +259,6 @@ class MainActivity : Activity() {
     private fun refreshRecords() {
         records.removeAllViews()
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
-        selectedRecordings.retainAll(list.map { it.name }.toSet())
         selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
         updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
@@ -325,7 +313,6 @@ class MainActivity : Activity() {
         return "监听时段 #${session.id}\n${formatter.format(java.time.Instant.ofEpochMilli(session.start))}\n至 ${formatter.format(java.time.Instant.ofEpochMilli(session.end))}"
     }
     private fun addRecordingRow(parent: LinearLayout, e: Evidence) {
-            parent.addView(CheckBox(this).apply { text="选择此录音（仅用于删除）"; isChecked=e.name in selectedRecordings; setOnCheckedChangeListener { _, checked -> if(checked) selectedRecordings.add(e.name) else selectedRecordings.remove(e.name) } })
             parent.addView(Button(this).apply {
                 text = "${e.name}\n${e.started}\n峰值 %.1f dB · %.1f 秒 · ${e.status}".format(e.peak, e.duration)
                 isAllCaps = false
@@ -364,7 +351,7 @@ class MainActivity : Activity() {
                 Thread {
                     var removed=0; val failures=mutableListOf<String>()
                     try { EvidenceStore(this).use { store -> names.forEach { name -> try { store.deleteRecording(name); removed++ } catch(e:Exception) { failures.add(e.message ?: name) } } } }
-                    finally { exporting=false; runOnUiThread { selectedRecordings.removeAll(names.toSet()); refreshRecords(); toast("已删除 $removed 段" + if(failures.isEmpty()) "" else "；失败：${failures.first()}") } }
+                    finally { exporting=false; runOnUiThread { refreshRecords(); toast("已删除 $removed 段" + if(failures.isEmpty()) "" else "；失败：${failures.first()}") } }
                 }.start()
             }.show()
     }
@@ -383,10 +370,10 @@ class MainActivity : Activity() {
         selectedReportSessions.retainAll(sessions.map { it.id }.toSet())
         updateReportButton()
         val chosen=sessions.filter { it.id in selectedReportSessions }
-        if(chosen.isEmpty()) { toast("请先勾选监听时段；录音文件的勾选仅用于删除"); return }
+        if(chosen.isEmpty()) { toast("请先勾选需要生成报告的监听时段"); return }
         val ids=chosen.map { it.id }.toSet()
         AlertDialog.Builder(this).setTitle("生成 ${chosen.size} 个监听时段的报告？")
-            .setMessage(chosen.joinToString("\n\n") { sessionTitle(it) }+"\n\n将包含这些时段的全部声级、超限统计和可用录音；音频文件的勾选不影响报告范围。")
+            .setMessage(chosen.joinToString("\n\n") { sessionTitle(it) }+"\n\n将包含这些时段的全部声级、超限统计和可用录音，无需选择单个录音。")
             .setNegativeButton("取消",null).setPositiveButton("生成 Word 和 HTML") { _, _ ->
                 generateReport(ids,false)
             }.show()
@@ -439,7 +426,7 @@ class MainActivity : Activity() {
     }
     private fun deleteReports() {
         if(exporting) { toast("请等待当前任务完成"); return }
-        AlertDialog.Builder(this).setTitle("删除应用内所有报告副本？").setMessage("不会删除原始录音、声级记录或已导出到其他位置的文件。").setNegativeButton("取消",null).setPositiveButton("删除报告") { _, _ ->
+        AlertDialog.Builder(this).setTitle("删除本地所有已生成报告？").setMessage("将永久删除本应用内部保存的全部 Word、HTML、图表及报告音频副本，并关闭浏览器预览。\n\n原始录音、监听时段、声级和超限统计保留。已导出到下载目录、电脑等其他位置的文件需自行删除。此操作不可撤销。").setNegativeButton("取消",null).setPositiveButton("删除全部报告") { _, _ ->
             if(exporting) return@setPositiveButton
             stopService(Intent(this,ReportPreviewService::class.java))
             exporting=true
@@ -448,7 +435,7 @@ class MainActivity : Activity() {
                     val base=File(filesDir,"reports").canonicalFile
                     check(!base.exists() || base.deleteRecursively()) { "部分报告未能删除" }
                     getSharedPreferences("reports",MODE_PRIVATE).edit().remove("latest").commit()
-                    runOnUiThread { toast("应用内报告副本已删除") }
+                    runOnUiThread { pendingReport=null; toast("本地所有已生成报告已删除，原始记录保留") }
                 } catch(e:Exception) { runOnUiThread { toast("删除失败：${e.message}") } }
                 finally { exporting=false }
             }.start()
@@ -508,7 +495,6 @@ class MainActivity : Activity() {
         outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
         outState.putBoolean("monitorStartPending",monitorStartPending); outState.putLong("monitorStartDeadline",monitorStartDeadline)
-        outState.putStringArrayList("selectedRecordings",ArrayList(selectedRecordings))
         outState.putLongArray("selectedReportSessions",selectedReportSessions.toLongArray())
         outState.putLongArray("expandedSessions",expandedSessions.toLongArray()); outState.putBoolean("legacyRecordingsExpanded",legacyRecordingsExpanded)
         outState.putInt("selectedTab",selectedTab); outState.putIntArray("pageScrolls",pages.mapIndexed { index, scroll -> if(pendingScrolls[index]>=0) pendingScrolls[index] else scroll.scrollY }.toIntArray())
