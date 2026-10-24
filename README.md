@@ -87,6 +87,34 @@ Word 的嵌入对象机制参考[微软的说明](https://support.microsoft.com/
 
 ## 数据与导出
 
+### 电脑通过 USB 一键获取报告
+
+先在手机的“记录”页生成报告，USB 连接电脑，开启 USB 调试并在手机上授权。双击仓库根目录 **`Get-Reports.cmd`**，自动获取最新完成的报告并打开电脑上的报告文件夹。
+
+- 输出默认保存在 `exports/reports/日期时间_随机编号/`，每次独立保存，不覆盖之前的下载；该目录已加入 `.gitignore`。
+- 获取内容包括 `report.docx`、`report.html`、声级曲线、`audio/` 原始报告音频及校验清单。HTML 的音频和图表需要保留相对目录；Word 可单独复制。
+- 传输后自动校验音频 SHA-256。失败的目录保留 `INCOMPLETE.txt` 标记，请重新执行。脚本只读取手机报告，不删除手机数据，也不触发重新生成。
+- 需要 Windows PowerShell 5.1 或 PowerShell 7、Windows 自带的 `tar.exe`，以及 Android SDK Platform Tools 中的 `adb.exe`。脚本从 PATH、`ANDROID_HOME` / `ANDROID_SDK_ROOT`、工程 `local.properties` 或默认 SDK 目录查找 ADB，也可手动指定路径。
+- 直接读取应用私有目录使用 `run-as`，适用于本工程 **debug 安装包**（包括当前测试设备安装的版本）。正式 release 包请使用应用内“导出报告”保存到下载目录后再复制。
+- 默认自动选择唯一的 USB 设备，多台设备时传入设备号。下载时请等待报告生成完成，并避免清理手机上的报告副本。
+
+命令行示例（在工程根目录执行）：
+
+```powershell
+# 最新报告，指定已连接的测试设备
+.\scripts\pull-reports.ps1 -Serial FA7951A00460
+
+# 所有已完成报告，自定义电脑保存目录
+.\scripts\pull-reports.ps1 -Serial FA7951A00460 -AllReports -OutputDirectory 'D:\Noise Reports'
+
+# 手动指定 ADB，并在完成后打开报告文件夹
+.\scripts\pull-reports.ps1 -AdbPath 'D:\AndroidSDK\platform-tools\adb.exe' -OpenFolder
+```
+
+若 PowerShell 执行策略阻止直接运行，可使用根目录的 `Get-Reports.cmd`，或执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\pull-reports.ps1`。一键入口也接受上述参数，例如 `Get-Reports.cmd -AllReports -Serial FA7951A00460`。
+
+### 数据文件位置与导出内容
+
 - 原始音频：应用私有目录 `files/recordings/`。
 - SQLite：`evidence.db`，含 `recordings`、`triggers`、`sessions`、`levels`、`exceed_events` 表。数据库 v1 → v2 自动迁移，保留旧录音。
 - 证据 ZIP：`audio/*.wav`、上述五张表的 CSV、`SHA256SUMS.txt`、说明文件。
