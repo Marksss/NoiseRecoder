@@ -1,6 +1,10 @@
-# 夜间声证（NoiseRecorder）
+# 噪音记录者（NoiseRecorder）
 
-Kotlin 原生 Android 工程，最低 Android 11（API 30），compile/target SDK 35，当前版本 1.8.0。无需账号，声音和数据库保存在手机本地。`INTERNET` 权限用于仅绑定 `127.0.0.1` 的本机浏览器报告预览，没有上传或外部网络请求。
+<img src="docs/branding/logo.png" width="96" height="96" alt="噪音记录者图标：蓝底白色声波与橙色录音圆点" />
+
+Kotlin 原生 Android 工程，最低 Android 11（API 30），compile/target SDK 35，当前版本 1.8.1。无需账号，声音和数据库保存在手机本地。`INTERNET` 权限用于仅绑定 `127.0.0.1` 的本机浏览器报告预览，没有上传或外部网络请求。
+
+应用名称为“噪音记录者”，桌面图标采用蓝底白色声波与橙色录音圆点，提供自适应图标及 Android 13+ 单色主题图标。可编辑的 [SVG](docs/branding/logo.svg) 和 [PNG 预览](docs/branding/logo.png) 位于 `docs/branding/`。
 
 ## 页面导航
 
@@ -39,7 +43,7 @@ Kotlin 原生 Android 工程，最低 Android 11（API 30），compile/target SD
 1. 用 Android Studio 打开本目录。设置 Gradle JDK 为 **17 或更高的兼容 JDK**（推荐 Studio 自带 JBR）。工程使用 AGP 8.9.2、Kotlin 2.1.20、Gradle 8.11.1。
 2. 在 SDK Manager 安装 Android SDK Platform 35、Build Tools 35.0.0。
 3. 让 Studio 生成 `local.properties`，或手动指定 `sdk.dir`，例如 `sdk.dir=D:/Programer/AndroidSDK`。
-4. 运行 `app`，允许麦克风和通知权限。Windows 命令行构建：
+4. 运行 `app`，允许麦克风和通知权限。建议进入“设置 → 后台运行”，点击“允许后台持续运行”，在系统确认框选择“允许”；返回后显示“电池优化：已豁免”。Windows 命令行构建：
 
    ```powershell
    .\gradlew.bat testDebugUnitTest assembleDebug
@@ -79,6 +83,7 @@ Android 对从后台新建麦克风前台服务有限制，Android 14+ 也不允
 - 为维持锁屏调度，预约服务及部分唤醒锁会保持运行，待命仍有耗电，建议充电使用。预约不是无常驻服务的系统闹钟。
 - 服务保持运行时，之后每天自动进入监听窗口。重启、应用更新或异常终止后保留每日预约，未到时段恢复等待，已到时段才提示手动开启；系统强行停止会抑制后台广播，需再次打开应用。立即值守通常需手动结束，系统终止、低存储或录音错误等情况也会结束并收尾。
 - 锁屏运行依赖系统保留服务。前台服务和唤醒锁不能保证抵抗所有厂商杀进程策略，需要在目标手机实测。
+- 设置页显示当前电池优化豁免状态。未豁免时点击“允许后台持续运行”，直接弹出仅针对本应用的系统确认框，由用户选择是否允许；返回后自动刷新状态。已豁免时入口改为“查看本应用电池设置”，直达本应用信息页。系统不支持直接申请时也先打开本应用信息页，最后才回退到总列表并提示查找“噪音记录者”。采用 Android 官方的 [电池豁免申请接口](https://developer.android.com/reference/android/provider/Settings#ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)，只在点击按钮后申请。
 - 默认音频源为 `UNPROCESSED`；设备不支持时系统可能回退到默认采集路径，硬件、自动增益、手机壳与摆放位置仍会影响结果。
 
 平台依据：[麦克风前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#microphone)、[后台启动限制](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start)。构建版本依据：[AGP 8.9 兼容要求](https://developer.android.com/build/releases/agp-8-9-0-release-notes)。

@@ -40,6 +40,8 @@ class MainActivity : Activity() {
     private lateinit var stopReservation: Button
     private lateinit var reportButton: Button
     private lateinit var recordSummary: TextView
+    private lateinit var batteryStatus: TextView
+    private lateinit var batteryAction: Button
     private var monitorStartPending=false
     private var monitorStartDeadline=0L
     private var monitorStopPending=false
@@ -85,7 +87,7 @@ class MainActivity : Activity() {
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
         val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
-        root.addView(TextView(this).apply { text="夜间声证"; textSize=24f; setTextColor(Color.rgb(25,42,58)); setPadding(dp(16),dp(16),dp(16),dp(4)) })
+        root.addView(TextView(this).apply { text="噪音记录者"; textSize=24f; setTextColor(Color.rgb(25,42,58)); setPadding(dp(16),dp(16),dp(16),dp(4)) })
         root.addView(tabBar)
         val pageHost = FrameLayout(this)
         root.addView(pageHost, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -206,10 +208,40 @@ class MainActivity : Activity() {
         val backgroundCard=surface()
         backgroundCard.addView(uiText("后台运行",17f))
         backgroundCard.addView(uiText("每日预约在时段外释放麦克风。重启后自动恢复预约等待；已到时段则提示手动开启。若一直未打开应用，到时可能需要点按通知启用麦克风。锁屏监听建议充电，并允许后台运行。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,dp(10)) })
-        backgroundCard.addView(uiAction("打开电池优化设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
+        batteryStatus=uiText("",14f,Color.rgb(100,116,139)).apply { setPadding(0,0,0,dp(10)) }
+        backgroundCard.addView(batteryStatus)
+        batteryAction=uiAction("允许后台持续运行") { openBatterySettings() }
+        backgroundCard.addView(batteryAction,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
+        updateBatteryStatus()
         selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun batteryExempt() = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+    private fun updateBatteryStatus() {
+        if(!::batteryStatus.isInitialized) return
+        val exempt=batteryExempt()
+        batteryStatus.text=if(exempt) "电池优化：已豁免，有助于锁屏持续值守。" else "电池优化：尚未豁免。点击下方按钮，在系统弹窗中允许即可，无需查找应用。"
+        batteryAction.text=if(exempt) "查看本应用电池设置" else "允许后台持续运行"
+    }
+    private fun openBatterySettings() {
+        val app=Uri.parse("package:$packageName")
+        if(!batteryExempt()) {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,app))
+                return
+            } catch(_: ActivityNotFoundException) { } catch(_: SecurityException) { }
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,app))
+            toast("在本应用的“电池”中查看或设置“不受限制 / 不优化”")
+        } catch(_: ActivityNotFoundException) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                toast("请切换到“所有应用”，找到“噪音记录者”，选择“不优化”")
+            } catch(_: ActivityNotFoundException) { toast("无法打开系统设置，请在系统应用管理中找到“噪音记录者”") }
+            catch(_: SecurityException) { toast("系统阻止了设置跳转，请在系统应用管理中找到“噪音记录者”") }
+        } catch(_: SecurityException) { toast("系统阻止了设置跳转，请在系统应用管理中找到“噪音记录者”") }
+    }
     private fun timeField(title: String, value: String, parent: LinearLayout): EditText = field(title,value,parent=parent).apply {
         keyListener=null
         isFocusable=false
@@ -674,7 +706,7 @@ class MainActivity : Activity() {
         }
     }
     override fun onResume() {
-        super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords()
+        super.onResume(); updateBatteryStatus(); handler.post(ticker); if(selectedTab==1) refreshRecords()
         if(intent.getBooleanExtra(DailyReservation.STOP_CHOICES,false)) {
             intent.removeExtra(DailyReservation.STOP_CHOICES); reservationResumeAttempted=true; showReservationStopChoices()
         } else resumeSavedReservation()

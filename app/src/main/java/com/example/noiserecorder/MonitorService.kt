@@ -53,7 +53,7 @@ class MonitorService : Service() {
         val stop = PendingIntent.getService(this, 1, Intent(this, MonitorService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE)
         val daily=activeMode==MonitorMode.DAILY
         val choices=PendingIntent.getActivity(this,2,Intent(this,MainActivity::class.java).putExtra(DailyReservation.STOP_CHOICES,true).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, "monitor").setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("夜间声证 · 值守 / 预约").setContentText(message).setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, if(daily) "值守操作" else "停止值守", if(daily) choices else stop).build()).build()
+        return Notification.Builder(this, "monitor").setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("噪音记录者 · 值守 / 预约").setContentText(message).setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, if(daily) "值守操作" else "停止值守", if(daily) choices else stop).build()).build()
     }
     private fun monitor(mode: MonitorMode) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
