@@ -145,6 +145,23 @@ adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.e
 
 原始结果保存在应用的 `files/historical-report-test.txt` 和 `files/reservation-recovery-test.txt`。实际重启及页面检查另使用 ADB 验证，设备重启不在 Instrumentation 内自动执行。
 
+## 1.8 时间选择、删除权限与预约停止
+
+- 开始/结束时间使用 24 小时原生时间选择框；取消不改草稿，确认后仍需保存。
+- 预约等待时可删除已结束的录音/时段，不取消预约；实际采集时可删除历史记录，当前时段及其已完成片段在界面和数据库同时保护。
+- 首页与预约通知提供“仅停止本次 / 永久取消预约”。仅停止本次保存 WAV、关闭当前时段、释放麦克风，保留每日预约；跳过标记持久保存，直至本次结束时间。也可手动恢复。
+- 本地源码编译与 **16 项 JUnit 测试通过**，新增同日及跨午夜停止期限检查。
+- 新增 `ReservationActionsInstrumentation`，仅使用新建样本并恢复设置，覆盖时间选择、等待/监听时的删除权限、停止收尾、重启保留跳过状态、手动恢复和永久取消。测试前需结束真实值守，测试不删除已有用户报告。
+- 在 `FA7951A00460`（Android 11）安装 1.8.0 后，该专项 **7 项 PASS、无 FAIL**；另回归预约恢复 **5 项 PASS**、历史报告并发生成/导出 **5 项 PASS**。当前 WAV 在历史单音频与整段删除期间继续增长；当前时段及已完成片段删除均被拒绝，停止本次后 WAV 头和数据库正常收尾。
+- 本轮未通过界面删除用户已有报告；验证等待与采集期间都可打开报告清理确认并取消，现有报告目录集合保持不变。所有测试创建的录音/时段均已清理，原设置、报告指针及用户数据集合保持不变。
+- 安装前用户允许停止当前 13:30—14:00 值守。测试后恢复原每日预约、阈值 45、偏移 90，并将本次剩余时段标记为已停止；最终首页确认预约勾选保留且尚未采集声音。未执行本轮真实整机重启，跳过持久化覆盖服务重启及模拟开机回调。
+
+```powershell
+adb -s $deviceSerial shell am instrument -w com.example.noiserecorder.test/com.example.noiserecorder.ReservationActionsInstrumentation
+```
+
+结果写入应用私有目录 `files/reservation-actions-test.txt`。
+
 ## 标准构建与测试
 
 ```powershell
@@ -167,7 +184,7 @@ adb -s $deviceSerial shell run-as com.example.noiserecorder cat files/smoke-repo
 
 ## 离线备用流程
 
-`scripts/verify-local.ps1` 接收 `JavaHome`、`KotlinHome`、`AndroidJar`、`JUnitJar`、`HamcrestJar` 路径，编译源码并运行十四项测试。
+`scripts/verify-local.ps1` 接收 `JavaHome`、`KotlinHome`、`AndroidJar`、`JUnitJar`、`HamcrestJar` 路径，编译源码并运行十六项测试。
 
 `scripts/build-local-test-apk.ps1` 接收 `JavaHome`、`KotlinHome`、`SdkRoot`，默认使用 SDK 34 / Build Tools 33，生成：
 

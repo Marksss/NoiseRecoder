@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private lateinit var immediateStart: Button
     private lateinit var immediateStop: Button
     private lateinit var resumeReservation: Button
+    private lateinit var stopReservation: Button
     private lateinit var reportButton: Button
     private lateinit var recordSummary: TextView
     private var monitorStartPending=false
@@ -58,7 +59,7 @@ class MainActivity : Activity() {
     private val ticker = object : Runnable {
         override fun run() {
             val state = if(!MonitorService.running && DailyReservation.enabled(this@MainActivity)) {
-                if(DailyReservation.inWindow(this@MainActivity)) "预约时段已到 · 等待手动开启" else "预约已恢复 · 等待预约时段"
+                if(DailyReservation.skipped(this@MainActivity)) "本次值守已停止 · 保留每日预约" else if(DailyReservation.inWindow(this@MainActivity)) "预约时段已到 · 等待手动开启" else "预约已恢复 · 等待预约时段"
             } else MonitorService.status
             if (status.text.toString() != state) status.text = state
             val reading = when {
@@ -119,15 +120,23 @@ class MainActivity : Activity() {
             text="预约每日值守"; textSize=16f; setTextColor(Color.rgb(30,41,59)); minHeight=dp(48)
             setOnClickListener {
                 if(isChecked) startMonitoring(MonitorMode.DAILY)
-                else if(DailyReservation.enabled(this@MainActivity) || (MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY)) stopMonitoring()
+                else if(DailyReservation.enabled(this@MainActivity) || (MonitorService.running && MonitorService.activeMode==MonitorMode.DAILY)) {
+                    if(DailyReservation.inWindow(this@MainActivity) && !DailyReservation.skipped(this@MainActivity)) showReservationStopChoices() else stopMonitoring()
+                }
                 updateMonitoringControls()
             }
         }
         reservationCard.addView(dailyReservation)
         scheduleSummary=uiText("",14f,Color.rgb(100,116,139)).apply { setPadding(dp(4),dp(4),0,0) }
         reservationCard.addView(scheduleSummary)
-        resumeReservation=uiAction("恢复预约监听") { startMonitoring(MonitorMode.DAILY) }
+        resumeReservation=uiAction("恢复预约监听") {
+            DailyReservation.resume(this)
+            if(!MonitorService.running) startMonitoring(MonitorMode.DAILY)
+            updateMonitoringControls()
+        }
         reservationCard.addView(resumeReservation,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8) })
+        stopReservation=uiAction("停止本次预约值守",destructive=true) { showReservationStopChoices() }
+        reservationCard.addView(stopReservation,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8) })
         updateScheduleSummary()
         val immediateCard=surface()
         immediateCard.addView(uiText("立即值守",17f))
@@ -142,14 +151,14 @@ class MainActivity : Activity() {
         addAction(shortcuts,uiAction("查看录音记录") { selectTab(1) })
         addAction(shortcuts,uiAction("调整监听设置") { selectTab(2) })
         content.addView(shortcuts,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(12) })
-        content.addView(uiText("取消勾选会结束预约；两种方式互斥。重启后自动恢复预约等待，已进入时段时提示手动开启。锁屏监听建议连接电源。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(12),0,0) })
+        content.addView(uiText("预约时段内可仅停止本次或永久取消预约；等待期间取消勾选即可取消预约。两种值守方式互斥，锁屏监听建议连接电源。",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(12),0,0) })
 
         page(1)
         val recordsHeading=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
         recordsHeading.addView(uiText("录音记录",23f),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
         recordsHeading.addView(uiAction("刷新",outlined=false) { refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(recordsHeading)
-        label("历史时段可在值守期间生成报告，当前时段结束后可选入。",13f)
+        label("历史记录可随时生成报告或删除；当前监听时段结束后可操作。预约等待期间可清理全部记录。",13f)
         reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
@@ -178,8 +187,8 @@ class MainActivity : Activity() {
         val endColumn=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         addAction(times,startColumn); addAction(times,endColumn)
         timeCard.addView(times)
-        start=field("开始（HH:mm）",savedInstanceState?.getString("draftStart") ?: clock(s.start),parent=startColumn)
-        end=field("结束（HH:mm）",savedInstanceState?.getString("draftEnd") ?: clock(s.end),parent=endColumn)
+        start=timeField("开始时间",savedInstanceState?.getString("draftStart") ?: clock(s.start),startColumn)
+        end=timeField("结束时间",savedInstanceState?.getString("draftEnd") ?: clock(s.end),endColumn)
         timeCard.addView(uiText("支持跨午夜，例如 22:00—06:00。",13f,Color.rgb(100,116,139)))
         val triggerCard=surface()
         triggerCard.addView(uiText("触发与校准",17f))
@@ -201,6 +210,16 @@ class MainActivity : Activity() {
         selectTab(savedInstanceState?.getInt("selectedTab")?.coerceIn(0,2) ?: 0)
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun timeField(title: String, value: String, parent: LinearLayout): EditText = field(title,value,parent=parent).apply {
+        keyListener=null
+        isFocusable=false
+        isClickable=true
+        contentDescription="选择$title"
+        setOnClickListener {
+            val minute=parseTime(text.toString())
+            TimePickerDialog(this@MainActivity,{ _, hour, minutes -> setText(clock(hour*60+minutes)) },minute/60,minute%60,true).apply { setTitle(title); show() }
+        }
+    }
     private fun selectTab(index: Int) {
         selectedTab=index
         pages.forEachIndexed { page, scroll -> scroll.visibility=if(page==index) View.VISIBLE else View.GONE }
@@ -295,8 +314,29 @@ class MainActivity : Activity() {
         dailyReservation.isEnabled=!monitorStartPending && !monitorStopPending && (!running || daily)
         immediateStart.isEnabled=!running && !reserved && !monitorStartPending && !monitorStopPending
         immediateStop.isEnabled=running && !daily && !monitorStopPending
-        resumeReservation.visibility=if(reserved && !running && DailyReservation.inWindow(this)) View.VISIBLE else View.GONE
+        resumeReservation.visibility=if(reserved && DailyReservation.inWindow(this) && (!running || DailyReservation.skipped(this))) View.VISIBLE else View.GONE
         resumeReservation.isEnabled=!monitorStartPending && !monitorStopPending
+        if(::stopReservation.isInitialized) {
+            stopReservation.visibility=if(reserved && DailyReservation.inWindow(this) && !DailyReservation.skipped(this)) View.VISIBLE else View.GONE
+            stopReservation.isEnabled=!monitorStartPending && !monitorStopPending
+        }
+    }
+    private fun showReservationStopChoices() {
+        if(!DailyReservation.enabled(this)) return
+        val dialog=AlertDialog.Builder(this).setTitle("停止预约值守")
+            .setMessage("停止后会保存当前录音。可只停止本次时段，或取消后续所有每日预约。")
+            .setNeutralButton("永久取消预约") { _, _ -> stopMonitoring() }
+            .setNegativeButton("返回",null)
+        if(DailyReservation.inWindow(this) && !DailyReservation.skipped(this)) dialog.setPositiveButton("仅停止本次") { _, _ ->
+                if(DailyReservation.enabled(this) && DailyReservation.inWindow(this)) {
+                    DailyReservation.skipCurrent(this)
+                    if(!MonitorService.running) DailyReservation.notifyRestore(this)
+                    toast("本次值守已停止，保留后续每日预约")
+                }
+                updateMonitoringControls()
+            }
+        dialog.show()
+        updateMonitoringControls()
     }
     private fun stopMonitoring() {
         DailyReservation.cancel(this)
@@ -400,11 +440,11 @@ class MainActivity : Activity() {
                 }
                 addAction(controls,expand)
             }
-            if(session!=null) addAction(controls,uiAction("删除时段",destructive=true,outlined=false) { confirmDeleteSession(session,rows.size) }.apply { contentDescription="删除整个监听时段 ${session.id}" })
+            if(session!=null) addAction(controls,uiAction("删除时段",destructive=true,outlined=false) { confirmDeleteSession(session,rows.size) }.apply { contentDescription="删除整个监听时段 ${session.id}"; isEnabled=session.status !in setOf("monitoring","deleting") })
             box.addView(controls)
             box.addView(audioList)
             if(rows.isEmpty()) box.addView(uiText("无录音，声级记录仍可用于报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
-            rows.forEach { addRecordingRow(audioList,it) }
+            rows.forEach { addRecordingRow(audioList,it,session?.status in setOf("monitoring","deleting")) }
             updateExpansion()
         }
         sessions.forEach { session -> group(sessionTitle(session),list.filter { it.sessionId==session.id },session) }
@@ -421,7 +461,7 @@ class MainActivity : Activity() {
         return if(start.toLocalDate()==end.toLocalDate()) "${start.format(date)}\n${start.format(time)} — ${end.format(time)}"
             else "${start.format(date)} ${start.format(time)}\n至 ${end.format(date)} ${end.format(time)}"
     }
-    private fun addRecordingRow(parent: LinearLayout, e: Evidence) {
+    private fun addRecordingRow(parent: LinearLayout, e: Evidence, protected: Boolean=false) {
         parent.addView(View(this).apply { setBackgroundColor(Color.rgb(232,237,242)) },LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(1)))
         val row=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(0,dp(12),0,dp(10)) }
         parent.addView(row)
@@ -431,7 +471,7 @@ class MainActivity : Activity() {
         row.addView(uiText(e.name,12f,Color.rgb(100,116,139)).apply { setTextIsSelectable(true); maxLines=2 })
         val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; setPadding(0,dp(8),0,0) }
         addAction(actions,uiAction("播放") { playRecording(e) }.apply { contentDescription="播放录音 ${e.name}" })
-        addAction(actions,uiAction("删除",destructive=true,outlined=false) { confirmDelete(listOf(e.name)) }.apply { contentDescription="删除录音 ${e.name}" })
+        addAction(actions,uiAction("删除",destructive=true,outlined=false) { confirmDelete(listOf(e.name)) }.apply { contentDescription="删除录音 ${e.name}"; isEnabled=!protected && e.status!="recording" })
         row.addView(actions)
     }
     private fun playRecording(e: Evidence) {
@@ -441,11 +481,12 @@ class MainActivity : Activity() {
         catch(_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
     }
     private fun confirmDeleteSession(session: MonitorSession, count: Int) {
-        if(MonitorService.running || exporting) { toast("请先停止立即值守或取消预约，并等待其他任务完成"); return }
+        if(exporting) { toast("请等待当前任务完成"); return }
+        if(EvidenceStore(this).use { it.sessions().any { s -> s.id==session.id && s.status in setOf("monitoring","deleting") } }) { toast("当前监听时段暂不可删除，可删除历史时段"); return }
         AlertDialog.Builder(this).setTitle("永久删除整个监听时段？")
             .setMessage("${sessionTitle(session)}\n\n将删除此时段的全部录音（当前 $count 段可用）、录音索引、触发日志、声级曲线和超限统计。此操作不可撤销。已生成或导出的报告、音频副本需另外删除。")
             .setNegativeButton("取消",null).setPositiveButton("删除整个时段") { _, _ ->
-                if(MonitorService.running || exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
+                if(exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
                 exporting=true
                 Thread {
                     var message="整个监听时段已删除"
@@ -456,12 +497,12 @@ class MainActivity : Activity() {
             }.show()
     }
     private fun confirmDelete(names: List<String>) {
-        if(MonitorService.running || exporting) { toast("请先停止值守并等待导出或报告生成完成"); return }
+        if(exporting) { toast("请等待导出或报告生成完成"); return }
         if(names.isEmpty()) { toast("请先选择录音"); return }
         AlertDialog.Builder(this).setTitle("永久删除 ${names.size} 段录音？")
             .setMessage("删除原始音频，保留监听声级、超限统计及删除标记。此操作不可撤销。已生成或导出的报告、音频副本不会被删除。")
             .setNegativeButton("取消",null).setPositiveButton("永久删除") { _, _ ->
-                if(MonitorService.running || exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
+                if(exporting) { toast("当前任务未结束，请稍后再试"); return@setPositiveButton }
                 exporting=true
                 Thread {
                     var removed=0; val failures=mutableListOf<String>()
@@ -621,7 +662,7 @@ class MainActivity : Activity() {
     private fun resumeSavedReservation() {
         if(!reservationResumeAttempted && DailyReservation.enabled(this) && !MonitorService.running && !monitorStartPending && !exporting) {
             reservationResumeAttempted=true
-            if(!DailyReservation.inWindow(this)) {
+            if(!DailyReservation.inWindow(this) || DailyReservation.skipped(this)) {
                 startMonitoring(MonitorMode.DAILY)
                 return
             }
@@ -632,9 +673,17 @@ class MainActivity : Activity() {
                 .setNegativeButton("稍后",null).show()
         }
     }
-    override fun onResume() { super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords(); resumeSavedReservation() }
+    override fun onResume() {
+        super.onResume(); handler.post(ticker); if(selectedTab==1) refreshRecords()
+        if(intent.getBooleanExtra(DailyReservation.STOP_CHOICES,false)) {
+            intent.removeExtra(DailyReservation.STOP_CHOICES); reservationResumeAttempted=true; showReservationStopChoices()
+        } else resumeSavedReservation()
+    }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent); setIntent(intent)
+        if(intent.getBooleanExtra(DailyReservation.STOP_CHOICES,false)) {
+            intent.removeExtra(DailyReservation.STOP_CHOICES); reservationResumeAttempted=true; showReservationStopChoices()
+        }
         if(intent.getBooleanExtra(DailyReservation.RESTORE,false)) {
             reservationResumeAttempted=false
             window.decorView.post { resumeSavedReservation() }

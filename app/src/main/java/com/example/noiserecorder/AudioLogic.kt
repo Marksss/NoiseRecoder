@@ -16,6 +16,10 @@ object AudioLogic {
     const val RATE = 16000
     fun inWindow(minute: Int, start: Int, end: Int): Boolean =
         if (start < end) minute in start until end else minute >= start || minute < end
+    fun nextBoundary(now: java.time.ZonedDateTime, minute: Int): java.time.ZonedDateTime {
+        val today=now.withHour(minute/60).withMinute(minute%60).withSecond(0).withNano(0)
+        return if(today.isAfter(now)) today else today.plusDays(1)
+    }
     fun dbfs(samples: ShortArray, count: Int): Double {
         if (count == 0) return -120.0
         var sum = 0.0

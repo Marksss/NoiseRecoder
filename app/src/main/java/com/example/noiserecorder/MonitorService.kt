@@ -19,6 +19,8 @@ class MonitorService : Service() {
         @Volatile var running = false
         @Volatile var activeMode: MonitorMode? = null
             private set
+        @Volatile var activeSettings: MonitorSettings? = null
+            private set
         @Volatile var listening = false
         @Volatile var status = "未开启值守"
         @Volatile var currentDbfs = -120.0
@@ -36,6 +38,7 @@ class MonitorService : Service() {
             manager.createNotificationChannel(NotificationChannel("monitor", "夜间监听", NotificationManager.IMPORTANCE_LOW))
             val mode = MonitorMode.fromValue(intent?.getStringExtra(EXTRA_MODE))
             activeMode=mode
+            activeSettings=MonitorSettings.load(this)
             status = if(mode==MonitorMode.IMMEDIATE) "正在开启立即值守" else "正在启用每日预约"
             startForeground(1, notification(status), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             if(mode==MonitorMode.DAILY) DailyReservation.enable(this) else DailyReservation.cancel(this)
@@ -48,7 +51,9 @@ class MonitorService : Service() {
     private fun notification(message: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, MonitorService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, "monitor").setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("夜间声证 · 值守 / 预约").setContentText(message).setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, "停止 / 取消预约", stop).build()).build()
+        val daily=activeMode==MonitorMode.DAILY
+        val choices=PendingIntent.getActivity(this,2,Intent(this,MainActivity::class.java).putExtra(DailyReservation.STOP_CHOICES,true).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return Notification.Builder(this, "monitor").setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("夜间声证 · 值守 / 预约").setContentText(message).setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, if(daily) "值守操作" else "停止值守", if(daily) choices else stop).build()).build()
     }
     private fun monitor(mode: MonitorMode) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
@@ -84,22 +89,23 @@ class MonitorService : Service() {
         }
         try {
             store.recover()
-            val settings = MonitorSettings.load(this)
+            val settings = checkNotNull(activeSettings)
             val samples = ShortArray(1600) // 100 ms RMS window
             val ring = PreRoll()
             var lastStorageCheck = 0L
             var completedWindow = false
             fun insideWindow(): Boolean {
                 val time=LocalTime.now()
-                return mode.shouldListen(time.hour*60+time.minute,settings.start,settings.end)
+                return mode.shouldListen(time.hour*60+time.minute,settings.start,settings.end) && (mode!=MonitorMode.DAILY || !DailyReservation.skipped(this))
             }
             while (alive.get()) {
                 if(!insideWindow()) {
                     if(recorder!=null) {
-                        closeRecording("window_end"); session?.close("window_end"); session=null
+                        val reason=if(DailyReservation.skipped(this)) "user_stop" else "window_end"
+                        closeRecording(reason); session?.close(reason); session=null
                         releaseMicrophone(); ring.clear(); completedWindow=true
                     }
-                    status=if(completedWindow) "本次预约已结束 · 已停止采集，等待下次每日时段" else "每日预约待命 · 等待已保存时段，未采集声音"
+                    status=if(DailyReservation.skipped(this)) "本次值守已停止 · 保留每日预约，等待下次时段" else if(completedWindow) "本次预约已结束 · 已停止采集，等待下次每日时段" else "每日预约待命 · 等待已保存时段，未采集声音"
                     updateNotification()
                     SystemClock.sleep(500)
                     continue
@@ -172,7 +178,7 @@ class MonitorService : Service() {
             try { session?.close(finishReason) } catch (e: Exception) { status = "声级记录收尾失败：${e.message}" }
             try { releaseMicrophone() } catch (_: Exception) { }
             store.close()
-            alive.set(false); running = false; activeMode=null
+            alive.set(false); running = false; activeMode=null; activeSettings=null
             wake?.let { if (it.isHeld) it.release() }; wake = null
             if (finishReason == "user_stop") status = "已停止值守并取消预约，录音已保存"
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
@@ -182,7 +188,7 @@ class MonitorService : Service() {
     override fun onDestroy() {
         alive.set(false)
         // A blocking read completes every ~100 ms; the worker owns audio/file cleanup.
-        if (worker == null) { wake?.let { if (it.isHeld) it.release() }; running = false; activeMode=null }
+        if (worker == null) { wake?.let { if (it.isHeld) it.release() }; running = false; activeMode=null; activeSettings=null }
         super.onDestroy()
     }
 }

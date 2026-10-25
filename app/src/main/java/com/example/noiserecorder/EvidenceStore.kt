@@ -69,7 +69,11 @@ class EvidenceStore(context: Context) : SQLiteOpenHelper(context, "evidence.db",
     /** Analytics remain intact. A durable intent lets recovery finish an interrupted deletion. */
     fun deleteRecording(name: String) {
         require(File(directory, name).canonicalFile.parentFile == directory.canonicalFile && name.endsWith(".wav"))
-        val old = readableDatabase.rawQuery("SELECT status FROM recordings WHERE name=?", arrayOf(name)).use { c -> check(c.moveToFirst()) { "录音不存在" }; c.getString(0) }
+        val old = readableDatabase.rawQuery("SELECT r.status,s.status FROM recordings r LEFT JOIN sessions s ON r.session_id=s.id WHERE r.name=?", arrayOf(name)).use { c ->
+            check(c.moveToFirst()) { "录音不存在" }
+            check(c.getString(1)!="monitoring") { "当前监听时段的录音暂不可删除，可删除历史时段录音" }
+            c.getString(0)
+        }
         check(old != "recording") { "请先停止值守" }
         writableDatabase.execSQL("UPDATE recordings SET status='deleting', deleted_at=? WHERE name=?", arrayOf<Any>(System.currentTimeMillis(), name))
         val file = File(directory, name)

@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AudioLogicTest {
+    @Test fun stoppingDaytimeOccurrenceSkipsOnlyUntilTodaysEnd() {
+        val now=java.time.ZonedDateTime.parse("2026-10-25T03:15:45.123+08:00[Asia/Shanghai]")
+        assertEquals(java.time.ZonedDateTime.parse("2026-10-25T06:00:00+08:00[Asia/Shanghai]"),AudioLogic.nextBoundary(now,360))
+    }
+    @Test fun stoppingOvernightOccurrenceUsesCorrectCalendarDay() {
+        val beforeMidnight=java.time.ZonedDateTime.parse("2026-10-25T23:15:00+08:00[Asia/Shanghai]")
+        val afterMidnight=beforeMidnight.plusHours(2)
+        val end=java.time.ZonedDateTime.parse("2026-10-26T06:00:00+08:00[Asia/Shanghai]")
+        assertEquals(end,AudioLogic.nextBoundary(beforeMidnight,360))
+        assertEquals(end,AudioLogic.nextBoundary(afterMidnight,360))
+        assertEquals(end.plusDays(1),AudioLogic.nextBoundary(end,360))
+    }
     @Test fun immediateModeIgnoresScheduledStartAndEnd() {
         for(minute in listOf(0,149,150,359,360,720,1439))
             assertTrue(MonitorMode.IMMEDIATE.shouldListen(minute,150,360))
