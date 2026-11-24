@@ -49,7 +49,7 @@ foreach ($kind in $kinds) {
         Check-Native
         $resourceArgs = @("$out/resources.zip")
     }
-    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 15 --version-name 1.8.1 @resourceArgs
+    & "$tools/aapt2.exe" link -o "$out/$kind-base.apk" --manifest $manifestPath -I $android --min-sdk-version 30 --target-sdk-version 35 --version-code 16 --version-name 1.8.2 @resourceArgs
     Check-Native
     $zip = [IO.Compression.ZipFile]::Open("$out/$kind-base.apk", 'Update')
     try { Get-ChildItem "$dex/*.dex" | ForEach-Object { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $_.Name) | Out-Null } } finally { $zip.Dispose() }

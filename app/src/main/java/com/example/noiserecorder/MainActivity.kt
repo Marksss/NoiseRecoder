@@ -24,6 +24,7 @@ import java.util.zip.ZipOutputStream
 
 class MainActivity : Activity() {
     companion object { @Volatile private var exporting = false }
+    private var recordingPlayer: RecordingPlayer? = null
     private lateinit var content: LinearLayout
     private lateinit var status: TextView
     private lateinit var level: TextView
@@ -507,10 +508,16 @@ class MainActivity : Activity() {
         row.addView(actions)
     }
     private fun playRecording(e: Evidence) {
-        if(e.status=="recording") { toast("正在录音，停止值守后可回放"); return }
-        val uri=Uri.parse("content://$packageName.evidence/${e.name}")
-        try { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri,"audio/wav").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
-        catch(_: ActivityNotFoundException) { toast("请安装支持 WAV 的播放器，或导出后回放") }
+        val current=EvidenceStore(this).use { it.list().firstOrNull { row -> row.name==e.name } }
+        if(current==null) { toast("录音已删除，请刷新记录"); return }
+        if(current.status=="recording") { toast("此音频正在录制，保存后可播放"); return }
+        try {
+            val root=File(filesDir,"recordings").canonicalFile
+            val file=File(root,current.name).canonicalFile
+            check(file.parentFile==root) { "录音路径无效" }
+            recordingPlayer?.close()
+            recordingPlayer=RecordingPlayer(this).also { it.show(file) }
+        } catch(e:Exception) { toast("播放失败：${e.message}") }
     }
     private fun confirmDeleteSession(session: MonitorSession, count: Int) {
         if(exporting) { toast("请等待当前任务完成"); return }
@@ -721,6 +728,6 @@ class MainActivity : Activity() {
             window.decorView.post { resumeSavedReservation() }
         }
     }
-    override fun onPause() { handler.removeCallbacks(ticker); super.onPause() }
-    override fun onDestroy() { progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
+    override fun onPause() { recordingPlayer?.close(); handler.removeCallbacks(ticker); super.onPause() }
+    override fun onDestroy() { recordingPlayer?.close(); progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }
