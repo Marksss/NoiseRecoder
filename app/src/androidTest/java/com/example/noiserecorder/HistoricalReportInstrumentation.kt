@@ -19,8 +19,8 @@ class HistoricalReportInstrumentation : Instrumentation() {
     private val log=StringBuilder()
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     private fun note(text: String) { log.append(text).append('\n'); sendStatus(0,Bundle().apply { putString("stream","$text\n") }) }
-    private fun waitFor(condition: () -> Boolean) {
-        val end=SystemClock.elapsedRealtime()+30000
+    private fun waitFor(timeoutMs: Long=30000, condition: () -> Boolean) {
+        val end=SystemClock.elapsedRealtime()+timeoutMs
         while(!condition()) { check(SystemClock.elapsedRealtime()<end) { "Timeout: ${MonitorService.status}" }; SystemClock.sleep(20) }
     }
     private fun find(view: View, value: String): View? {
@@ -37,6 +37,7 @@ class HistoricalReportInstrumentation : Instrumentation() {
         val preferences=targetContext.getSharedPreferences("reports",Activity.MODE_PRIVATE)
         val previousLatest=preferences.getString("latest",null)
         val export=File(targetContext.cacheDir,"history-report-test-${java.util.UUID.randomUUID()}.docx")
+        val evidenceZip=File(targetContext.cacheDir,"evidence-history-test.zip")
         var generated: File?=null
         var success=false
         try {
@@ -57,8 +58,9 @@ class HistoricalReportInstrumentation : Instrumentation() {
             waitFor { MonitorService.listening && store.list().any { it.name !in initialNames && it.name !in historyNames } }
             val live=store.list().single { it.name !in initialNames && it.name !in historyNames }
             val liveFile=File(store.directory,live.name)
+            runOnMainSync { checkNotNull(find(activity.window.decorView,"记录")).performClick() }
+            waitFor { find(activity.window.decorView,"选择报告时段 ${live.sessionId}")!=null }
             runOnMainSync {
-                checkNotNull(find(activity.window.decorView,"记录")).performClick()
                 check(!checkNotNull(find(activity.window.decorView,"选择报告时段 ${live.sessionId}")).isEnabled)
                 checkNotNull(find(activity.window.decorView,"选择报告时段 ${logger.id}")).performClick()
                 checkNotNull(find(activity.window.decorView,"生成所选时段报告")).performClick()
@@ -82,6 +84,30 @@ class HistoricalReportInstrumentation : Instrumentation() {
             liveFile.inputStream().use { check(it.read(liveHeader)==4) }
             check(liveHeader.all { it.toInt()==0 }) { "Live WAV was repaired while still recording" }
             note("PASS: microphone and live WAV continue; live session/index remain active and header is untouched")
+            val extra="closed_in_live_${java.util.UUID.randomUUID()}.wav"
+            store.begin(extra,Instant.now().toString(),50.0,MonitorSettings(),live.sessionId)
+            WavWriter(File(store.directory,extra)).use { it.write(ByteArray(3200)) }
+            store.finish(extra,50.0,0.1,"complete"); store.trigger(extra,50.0)
+            val exportBusy=MainActivity::class.java.getDeclaredField("exporting").apply { isAccessible=true }
+            waitFor { !exportBusy.getBoolean(null) }
+            val beforeExport=liveFile.length()
+            MainActivity::class.java.getDeclaredField("exportKind").apply { isAccessible=true }.set(activity,"zip")
+            val exportResult=MainActivity::class.java.getDeclaredMethod("onActivityResult",Int::class.javaPrimitiveType,Int::class.javaPrimitiveType,Intent::class.java).apply { isAccessible=true }
+            runOnMainSync { exportResult.invoke(activity,20,Activity.RESULT_OK,Intent().setData(Uri.fromFile(evidenceZip))) }
+            waitFor(120000) { !exportBusy.getBoolean(null) && evidenceZip.exists() }
+            ZipFile(evidenceZip).use { zip ->
+                check(zip.getEntry("audio/${live.name}")==null && zip.getEntry("audio/$extra")==null)
+                check(historyNames.all { zip.getEntry("audio/$it")!=null })
+                for(table in listOf("recordings","triggers","sessions","levels","exceed_events")) {
+                    val csv=zip.getInputStream(zip.getEntry("$table.csv")).bufferedReader().readText()
+                    check(!csv.contains(live.name) && !csv.contains(extra))
+                    if(table=="sessions") check(csv.lineSequence().drop(1).none { it.startsWith("\"${live.sessionId}\",") })
+                    if(table in setOf("levels","exceed_events")) check(csv.lineSequence().drop(1).none { it.split(',').getOrNull(1)=="\"${live.sessionId}\"" })
+                }
+            }
+            waitFor { liveFile.length()>beforeExport+3200 }
+            check(MonitorService.listening && store.sessions().single { it.id==live.sessionId }.status=="monitoring")
+            note("PASS: evidence ZIP exports while microphone/WAV continue; all five tables and audio exclude the live period, including its completed clip")
             val html=File(root,"report.html").readText()
             check(historyNames.all { html.contains(it) } && !html.contains(live.name))
             ZipFile(File(root,"report.docx")).use { zip ->
@@ -115,7 +141,7 @@ class HistoricalReportInstrumentation : Instrumentation() {
                 }
                 root.deleteRecursively()
             }
-            export.delete()
+            export.delete(); evidenceZip.delete()
             for(session in store.sessions().filter { it.id !in initialIds }) store.deleteSession(session.id)
             check(initialNames==store.list().map { it.name }.toSet())
             check(initialIds==store.sessions().map { it.id }.toSet())

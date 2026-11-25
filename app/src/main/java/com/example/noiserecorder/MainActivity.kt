@@ -100,14 +100,14 @@ class MainActivity : Activity() {
         legacyRecordingsExpanded=savedInstanceState?.getBoolean("legacyRecordingsExpanded") ?: false
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
-        val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
+        val tabBar = LinearLayout(this).apply { setBackgroundColor(Color.WHITE); orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
         root.addView(tabBar)
         val pageHost = FrameLayout(this)
         root.addView(pageHost, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
         listOf("首页", "记录", "设置").forEachIndexed { index, title ->
             tabBar.addView(Button(this).apply {
-                text=title; isAllCaps=false; textSize=16f
+                text=title; isAllCaps=false; textSize=17f; elevation=0f; stateListAnimator=null; setPadding(0,0,0,0)
                 setOnClickListener { selectTab(index) }
                 tabs.add(this)
             },LinearLayout.LayoutParams(0,dp(48),1f).apply { setMargins(dp(3),0,dp(3),0) })
@@ -182,7 +182,6 @@ class MainActivity : Activity() {
             contentDescription="全选或取消选择全部监听时段"
             setOnClickListener { setAllRecordSelection(isChecked) }
         }
-        content.addView(selectAllPeriods)
         reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
@@ -200,6 +199,7 @@ class MainActivity : Activity() {
         content.addView(reportActions)
         content.addView(uiAction("删除本地所有已生成报告",destructive=true,outlined=false) { deleteReports() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity=Gravity.END; topMargin=dp(4) })
         recordSummary=uiText("",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) }
+        content.addView(selectAllPeriods)
         content.addView(recordSummary)
         records=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         content.addView(records)
@@ -283,8 +283,15 @@ class MainActivity : Activity() {
         tabs.forEachIndexed { tab, button ->
             val selected=tab==index
             button.isSelected=selected
-            button.setTextColor(if(selected) Color.WHITE else Color.rgb(25,42,58))
-            button.background=GradientDrawable().apply { cornerRadius=dp(10).toFloat(); setColor(if(selected) Color.rgb(28,100,160) else Color.rgb(228,234,240)) }
+            button.setTextColor(if(selected) Color.rgb(28,100,160) else Color.rgb(100,116,139))
+            button.typeface=if(selected) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
+            val layers=android.graphics.drawable.LayerDrawable(arrayOf(
+                android.graphics.drawable.ColorDrawable(Color.TRANSPARENT),
+                android.graphics.drawable.ColorDrawable(if(selected) Color.rgb(28,100,160) else Color.TRANSPARENT)
+            )).apply {
+                setLayerGravity(1,Gravity.BOTTOM); setLayerHeight(1,dp(3)); setLayerInset(1,dp(16),0,dp(16),0)
+            }
+            button.background=RippleDrawable(ColorStateList.valueOf(Color.argb(30,28,100,160)),layers,null)
             button.contentDescription="${button.text}，${if(selected) "当前页" else "切换页面"}"
         }
         currentFocus?.clearFocus()
@@ -740,7 +747,6 @@ class MainActivity : Activity() {
         }.show()
     }
     private fun chooseExport(kind: String) {
-        if (MonitorService.running) { toast("请先停止值守，确保原始录音完成保存"); return }
         if (exporting) return
         exportKind = kind
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = if (kind == "zip") "application/zip" else "text/csv"; putExtra(Intent.EXTRA_TITLE, "noise_evidence_${System.currentTimeMillis()}.$kind") }, 20)
@@ -750,7 +756,6 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode !in setOf(20,21) || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        if (requestCode==20 && MonitorService.running) { toast("值守已开启，请停止后重新导出证据包"); return }
         exporting = true
         val kind = exportKind
         Thread {
@@ -763,14 +768,14 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 EvidenceStore(this).use { store ->
-                    store.recover()
+                    val snapshot=store.closedEvidenceSnapshot()
                     val stream = requireNotNull(contentResolver.openOutputStream(uri, "wt"))
-                    if (kind == "csv") stream.bufferedWriter(Charsets.UTF_8).use { it.write(store.csv("triggers")) }
+                    if (kind == "csv") stream.bufferedWriter(Charsets.UTF_8).use { it.write(snapshot.tables.getValue("triggers")) }
                     else ZipOutputStream(stream.buffered()).use { zip ->
                         fun entry(name: String, value: String) { zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray(Charsets.UTF_8)); zip.closeEntry() }
-                        listOf("recordings","triggers","sessions","levels","exceed_events").forEach { entry("$it.csv",store.csv(it)) }
+                        listOf("recordings","triggers","sessions","levels","exceed_events").forEach { entry("$it.csv",snapshot.tables.getValue(it)) }
                         val hashes = StringBuilder()
-                        store.list().forEach { evidence ->
+                        snapshot.recordings.forEach { evidence ->
                             val f = File(store.directory, evidence.name)
                             if (f.exists()) {
                                 zip.putNextEntry(ZipEntry("audio/${f.name}"))
@@ -780,7 +785,7 @@ class MainActivity : Activity() {
                             }
                         }
                         entry("SHA256SUMS.txt", hashes.toString())
-                        entry("README.txt", "Original PCM WAV: 16000 Hz, mono, signed 16-bit little-endian. CSV timestamps: UTC ISO-8601; filenames: local time. Estimated SPL = dBFS + calibration offset, unweighted RMS. triggers.csv: at most one sample per second during sustained exceedance; recording tail extends on every exceeding frame. SHA-256 verifies exported file bytes, not legal authenticity. Missing recordings remain listed with status=missing.\n")
+                        entry("README.txt", "Only periods closed at export start are included. Active monitoring/deleting periods and all their audio, triggers, levels and events are excluded, even if they finish during export. Finished legacy audio is included. Original PCM WAV: 16000 Hz, mono, signed 16-bit little-endian. CSV timestamps: UTC ISO-8601; filenames: local time. Estimated SPL = dBFS + calibration offset, unweighted RMS. triggers.csv: at most one sample per second during sustained exceedance; recording tail extends on every exceeding frame. SHA-256 verifies exported file bytes, not legal authenticity. Missing recordings remain listed with status=missing.\n")
                     }
                 }
                 runOnUiThread { toast("导出完成") }

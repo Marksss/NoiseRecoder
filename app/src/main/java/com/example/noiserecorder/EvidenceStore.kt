@@ -95,11 +95,39 @@ class EvidenceStore(context: Context) : SQLiteOpenHelper(context, "evidence.db",
             else finish(e.name, e.peak, 0.0, "missing")
         }
     }
-    fun csv(table: String): String {
+    data class ClosedEvidenceSnapshot(val tables: Map<String,String>, val recordings: List<Evidence>)
+    /** Freeze eligible IDs first: a live period cannot enter the export if it closes later. */
+    fun closedEvidenceSnapshot(): ClosedEvidenceSnapshot {
+        val all=sessions()
+        val ids=all.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet()
+        val eligible=list().filter { it.status!="recording" && (it.sessionId==null || it.sessionId in ids) }
+        val sessionKeys=ids.joinToString(",").ifEmpty { "NULL" }
+        // Keep historical deletion markers in CSV, but never export active-period metadata.
+        val predicate="status NOT IN ('recording','deleting') AND (session_id IS NULL OR session_id IN ($sessionKeys))"
+        val names=readableDatabase.rawQuery("SELECT name FROM recordings WHERE $predicate",null).use { c ->
+            buildList { while(c.moveToNext()) add("'"+c.getString(0).replace("'","''")+"'") }.joinToString(",").ifEmpty { "NULL" }
+        }
+        val filters=mapOf("sessions" to "id IN ($sessionKeys)","levels" to "session_id IN ($sessionKeys)","exceed_events" to "session_id IN ($sessionKeys)","recordings" to "name IN ($names)","triggers" to "name IN ($names)")
+        return ClosedEvidenceSnapshot(filters.mapValues { (table,where) -> csvWhere(table,where) },eligible)
+    }
+    fun csv(table: String): String = csvWhere(table, "1")
+    private fun csvWhere(table: String, where: String): String {
         require(table in setOf("recordings", "triggers", "sessions", "levels", "exceed_events"))
-        return readableDatabase.rawQuery("SELECT * FROM $table ORDER BY rowid", null).use { c ->
-            fun quote(s: String) = "\"" + s.replace("\"", "\"\"") + "\""
-            buildString { append('\uFEFF'); append(c.columnNames.joinToString(",", transform = ::quote)); append("\r\n"); while(c.moveToNext()) { append((0 until c.columnCount).joinToString(",") { quote(c.getString(it) ?: "") }); append("\r\n") } }
+        fun quote(value: String)="\""+value.replace("\"","\"\"")+"\""
+        return buildString {
+            append('\uFEFF')
+            var last=0L
+            var header=false
+            while(true) {
+                // Release the read cursor before CSV formatting, so live writes can continue.
+                val batch=readableDatabase.rawQuery("SELECT rowid,* FROM $table NOT INDEXED WHERE ($where) AND rowid>? ORDER BY rowid LIMIT 512",arrayOf(last.toString())).use { c ->
+                    if(!header) { append(c.columnNames.drop(1).joinToString(",",transform=::quote)); append("\r\n"); header=true }
+                    buildList { while(c.moveToNext()) add(c.getLong(0) to (1 until c.columnCount).map { c.getString(it) ?: "" }) }
+                }
+                if(batch.isEmpty()) break
+                batch.forEach { (_,values) -> append(values.joinToString(",",transform=::quote)); append("\r\n") }
+                last=batch.last().first
+            }
         }
     }
     fun sessions(): List<MonitorSession> = readableDatabase.rawQuery("SELECT id,start_ms,end_ms,threshold,offset,status FROM sessions ORDER BY start_ms DESC,id DESC", null).use { c -> buildList { while(c.moveToNext()) add(MonitorSession(c.getLong(0),c.getLong(1),c.getLong(2),c.getDouble(3),c.getDouble(4),c.getString(5))) } }
