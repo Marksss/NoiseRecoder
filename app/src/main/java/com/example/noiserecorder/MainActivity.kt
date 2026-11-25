@@ -46,6 +46,7 @@ class MainActivity : Activity() {
     private lateinit var immediateStop: Button
     private lateinit var resumeReservation: Button
     private lateinit var stopReservation: Button
+    private lateinit var selectAllPeriods: CheckBox
     private lateinit var reportButton: Button
     private lateinit var recordSummary: TextView
     private lateinit var batteryStatus: TextView
@@ -96,7 +97,6 @@ class MainActivity : Activity() {
         savedInstanceState?.getIntArray("pageScrolls")?.forEachIndexed { index, y -> if(index < pendingScrolls.size) pendingScrolls[index]=y }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(245, 247, 250)) }
         val tabBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
-        root.addView(TextView(this).apply { text="噪音记录者"; textSize=24f; setTextColor(Color.rgb(25,42,58)); setPadding(dp(16),dp(16),dp(16),dp(4)) })
         root.addView(tabBar)
         val pageHost = FrameLayout(this)
         root.addView(pageHost, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -173,10 +173,12 @@ class MainActivity : Activity() {
         recordsHeading.addView(uiAction("刷新",outlined=false) { recordLimit=15; pages[1].scrollTo(0,0); refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(recordsHeading)
         label("历史记录可随时生成报告或删除；当前监听时段结束后可操作。预约等待期间可清理全部记录。",13f)
-        val selectionActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        addAction(selectionActions,uiAction("全选时段") { setAllRecordSelection(true) })
-        addAction(selectionActions,uiAction("取消全选") { setAllRecordSelection(false) })
-        content.addView(selectionActions)
+        selectAllPeriods=CheckBox(this).apply {
+            text="全选监听时段"; textSize=16f; setTextColor(Color.rgb(30,41,59)); minHeight=dp(48)
+            contentDescription="全选或取消选择全部监听时段"
+            setOnClickListener { setAllRecordSelection(isChecked) }
+        }
+        content.addView(selectAllPeriods)
         reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
@@ -454,10 +456,10 @@ class MainActivity : Activity() {
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         recordSummary.text="${sessions.size} 个监听时段 · ${list.size} 段录音"
         selectedReportSessions.retainAll(sessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet())
+        recordSessions=sessions
         updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
-        recordSessions=sessions
         recordAudio=list
         renderedSessions=0
         recordsFooter=null
@@ -613,6 +615,11 @@ class MainActivity : Activity() {
         if(selected && selectedReportSessions.size>31) toast("已全选 ${selectedReportSessions.size} 个历史时段；每份报告最多 31 个，请分批生成")
     }
     private fun updateReportButton() {
+        if(::selectAllPeriods.isInitialized) {
+            val eligible=recordSessions.filter { it.status !in setOf("monitoring","deleting") }
+            selectAllPeriods.isChecked=eligible.isNotEmpty() && eligible.all { it.id in selectedReportSessions }
+            selectAllPeriods.isEnabled=eligible.isNotEmpty() || selectedReportSessions.isNotEmpty()
+        }
         recordSelectionBoxes.forEach { (id,box) -> box.isChecked=id in selectedReportSessions }
         if(::reportButton.isInitialized) reportButton.text="生成所选时段报告（${selectedReportSessions.size}）"
     }

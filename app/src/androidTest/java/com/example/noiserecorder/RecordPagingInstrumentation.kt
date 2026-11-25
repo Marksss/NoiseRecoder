@@ -28,9 +28,9 @@ class RecordPagingInstrumentation : Instrumentation() {
             check(total>15) { "Need more than 15 existing periods for this device check; got $total" }
             check(count()==15)
             note("PASS: first page renders exactly 15 periods")
-            val select=MainActivity::class.java.getDeclaredMethod("setAllRecordSelection",Boolean::class.javaPrimitiveType).apply { isAccessible=true }
+            val select=field("selectAllPeriods").get(activity) as android.widget.CheckBox
             val eligible=EvidenceStore(targetContext).use { it.sessions().filter { s -> s.status !in setOf("monitoring","deleting") }.map { s -> s.id }.toSet() }
-            runOnMainSync { select.invoke(activity,true) }
+            runOnMainSync { check(!select.isChecked); select.performClick(); check(select.isChecked) }
             check((field("selectedReportSessions").get(activity) as Set<*>)==eligible)
             note("PASS: select all includes eligible periods beyond the first page")
             @Suppress("UNCHECKED_CAST")
@@ -55,7 +55,12 @@ class RecordPagingInstrumentation : Instrumentation() {
             @Suppress("UNCHECKED_CAST")
             val boxes=field("recordSelectionBoxes").get(activity) as Map<Long,android.widget.CheckBox>
             check(boxes.all { (id,box) -> box.isChecked==(id in eligible) })
-            runOnMainSync { select.invoke(activity,false) }
+            runOnMainSync {
+                boxes.values.first { it.isEnabled && it.isChecked }.performClick()
+                check(!select.isChecked)
+                select.performClick(); check(select.isChecked)
+                select.performClick(); check(!select.isChecked)
+            }
             check((field("selectedReportSessions").get(activity) as Set<*>).isEmpty())
             check((field("recordSelectionBoxes").get(activity) as Map<*,*>).values.all { !(it as android.widget.CheckBox).isChecked })
             note("PASS: newly loaded checkboxes match selection, and cancel all clears every period")
