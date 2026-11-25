@@ -33,6 +33,12 @@ class MainActivity : Activity() {
     private lateinit var threshold: EditText
     private lateinit var offset: EditText
     private lateinit var records: LinearLayout
+    private var recordSessions=emptyList<MonitorSession>()
+    private var recordAudio=emptyList<Evidence>()
+    private var recordLimit=15
+    private var renderedSessions=0
+    private var recordsLoading=false
+    private var recordsFooter: TextView?=null
     private lateinit var scheduleSummary: TextView
     private lateinit var dailyReservation: CheckBox
     private lateinit var immediateStart: Button
@@ -79,6 +85,7 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        recordLimit=(savedInstanceState?.getInt("recordLimit",15) ?: 15).coerceAtLeast(15)
         exportKind = savedInstanceState?.getString("exportKind") ?: "zip"
         pendingReport = savedInstanceState?.getString("pendingReport")
         pendingMonitorMode = MonitorMode.fromValue(savedInstanceState?.getString("pendingMonitorMode"))
@@ -104,6 +111,9 @@ class MainActivity : Activity() {
                 if(scroll.visibility==View.VISIBLE && scroll.height>0 && pendingScrolls[index]>=0) {
                     val y=pendingScrolls[index]; pendingScrolls[index]=-1; scroll.scrollTo(0,y)
                 }
+            }
+            if(index==1) scroll.setOnScrollChangeListener { _, _, y, _, oldY ->
+                if(selectedTab==1 && y>oldY && !scroll.canScrollVertically(1)) loadMoreRecords()
             }
             pages.add(scroll)
             pageHost.addView(scroll,FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT))
@@ -159,7 +169,7 @@ class MainActivity : Activity() {
         page(1)
         val recordsHeading=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
         recordsHeading.addView(uiText("录音记录",23f),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
-        recordsHeading.addView(uiAction("刷新",outlined=false) { refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
+        recordsHeading.addView(uiAction("刷新",outlined=false) { recordLimit=15; pages[1].scrollTo(0,0); refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(recordsHeading)
         label("历史记录可随时生成报告或删除；当前监听时段结束后可操作。预约等待期间可清理全部记录。",13f)
         reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
@@ -438,7 +448,43 @@ class MainActivity : Activity() {
         updateReportButton()
         expandedSessions.retainAll(sessions.map { it.id }.toSet())
         if (list.isEmpty() && sessions.isEmpty()) records.addView(TextView(this).apply { text = "暂无监听时段或录音。" })
-        fun group(title: String, rows: List<Evidence>, session: MonitorSession?) {
+        recordSessions=sessions
+        recordAudio=list
+        renderedSessions=0
+        recordsFooter=null
+        appendRecordPage(recordLimit)
+    }
+    private fun loadMoreRecords() {
+        if(recordsLoading || renderedSessions>=recordSessions.size) return
+        recordsLoading=true
+        recordsFooter?.text="正在加载…"
+        records.post {
+            try {
+                recordLimit=renderedSessions+15
+                appendRecordPage(15)
+            } finally { recordsLoading=false }
+        }
+    }
+    private fun appendRecordPage(count: Int) {
+        recordsFooter?.let { records.removeView(it) }
+        val end=minOf(renderedSessions+count,recordSessions.size)
+        recordSessions.subList(renderedSessions,end).forEach { session ->
+            addRecordGroup(sessionTitle(session),recordAudio.filter { it.sessionId==session.id },session)
+        }
+        renderedSessions=end
+        if(end==recordSessions.size) {
+            val ids=recordSessions.map { it.id }.toSet()
+            val legacy=recordAudio.filter { it.sessionId==null || it.sessionId !in ids }
+            if(legacy.isNotEmpty()) addRecordGroup("未归属监听时段的录音",legacy,null)
+        }
+        recordsFooter=uiText(if(end<recordSessions.size) "上拉加载更多 · 已显示 $end / ${recordSessions.size} 个时段" else "已加载全部 ${recordSessions.size} 个时段",13f,Color.rgb(100,116,139)).apply {
+            gravity=Gravity.CENTER; minHeight=dp(48)
+            contentDescription=if(end<recordSessions.size) "加载更多监听时段" else "监听时段已全部加载"
+            setOnClickListener { loadMoreRecords() }
+        }
+        records.addView(recordsFooter)
+    }
+    private fun addRecordGroup(title: String, rows: List<Evidence>, session: MonitorSession?) {
             val box=surface(records,bottom=8)
             box.addView(uiText(title,17f))
             if(session!=null) box.addView(uiText("${rows.size} 段录音 · 阈值 ${ReportFormat.number(session.threshold)} dB · ${recordStatus(session.status)}",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(6),0,dp(4)) })
@@ -480,11 +526,7 @@ class MainActivity : Activity() {
             rows.forEach { addRecordingRow(audioList,it,session?.status in setOf("monitoring","deleting")) }
             updateExpansion()
         }
-        sessions.forEach { session -> group(sessionTitle(session),list.filter { it.sessionId==session.id },session) }
-        val ids=sessions.map { it.id }.toSet()
-        val legacy=list.filter { it.sessionId==null || it.sessionId !in ids }
-        if(legacy.isNotEmpty()) group("未归属监听时段的录音",legacy,null)
-    }
+
     private fun sessionTitle(session: MonitorSession): String {
         val zone=java.time.ZoneId.systemDefault()
         val start=java.time.Instant.ofEpochMilli(session.start).atZone(zone)
@@ -689,6 +731,7 @@ class MainActivity : Activity() {
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("recordLimit",recordLimit)
         outState.putString("exportKind",exportKind); outState.putString("pendingReport",pendingReport)
         outState.putString("pendingMonitorMode",pendingMonitorMode.name)
         outState.putLongArray("selectedReportSessions",selectedReportSessions.toLongArray())
