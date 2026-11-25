@@ -38,6 +38,10 @@ class MainActivity : Activity() {
     private var recordAudio=emptyList<Evidence>()
     private var recordLimit=15
     private var renderedSessions=0
+    private val recordReader=java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var recordsQueryPending=false
+    private var recordsQueryGeneration=0
+    private var recordsReady=false
     private var recordsLoading=false
     private var recordsFooter: TextView?=null
     private lateinit var scheduleSummary: TextView
@@ -285,7 +289,7 @@ class MainActivity : Activity() {
         }
         currentFocus?.clearFocus()
         (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(window.decorView.windowToken,0)
-        if(index==1 && ::records.isInitialized) refreshRecords()
+        if(index==1 && ::records.isInitialized) refreshRecords(false)
     }
     private fun updateScheduleSummary() {
         val saved=MonitorSettings.load(this)
@@ -450,10 +454,38 @@ class MainActivity : Activity() {
                 if (reference != null && reference.isFinite() && reference in 0.0..140.0) offset.setText(String.format(Locale.US, "%.2f", reference - measured)) else toast("参考读数无效")
             }.setNegativeButton("取消", null).show()
     }
-    private fun refreshRecords() {
+    private fun refreshRecords(force: Boolean=true) {
+        if(!force && recordsQueryPending) return
+        val generation=++recordsQueryGeneration
+        recordsQueryPending=true
+        if(!recordsReady) {
+            recordSummary.text="正在加载监听时段…"
+            selectAllPeriods.isEnabled=false
+        }
+        recordReader.execute {
+            try {
+                // Listing is read-only. Recovery belongs to monitor startup, not a tab switch.
+                val (list,sessions)=EvidenceStore(this).use { it.list() to it.sessions() }
+                runOnUiThread {
+                    if(isDestroyed || generation!=recordsQueryGeneration) return@runOnUiThread
+                    recordsQueryPending=false
+                    if(!force && recordsReady && list==recordAudio && sessions==recordSessions) return@runOnUiThread
+                    recordsReady=true
+                    applyRecordSnapshot(list,sessions)
+                }
+            } catch(e:Exception) {
+                runOnUiThread {
+                    if(isDestroyed || generation!=recordsQueryGeneration) return@runOnUiThread
+                    recordsQueryPending=false
+                    if(!recordsReady) recordSummary.text="加载失败，请点击刷新重试"
+                    toast("读取记录失败：${e.message}")
+                }
+            }
+        }
+    }
+    private fun applyRecordSnapshot(list: List<Evidence>, sessions: List<MonitorSession>) {
         records.removeAllViews()
         recordSelectionBoxes.clear()
-        val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         recordSummary.text="${sessions.size} 个监听时段 · ${list.size} 段录音"
         selectedReportSessions.retainAll(sessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet())
         recordSessions=sessions
@@ -514,8 +546,13 @@ class MainActivity : Activity() {
             if(session?.status=="monitoring") box.addView(uiText("当前正在监听，时段结束后可选入报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
             val audioList=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
             val expand=uiAction("",outlined=false) { }
+            var audioRowsCreated=false
             fun updateExpansion() {
                 val opened=if(session==null) legacyRecordingsExpanded else session.id in expandedSessions
+                if(opened && !audioRowsCreated) {
+                    rows.forEach { addRecordingRow(audioList,it,session?.status in setOf("monitoring","deleting")) }
+                    audioRowsCreated=true
+                }
                 audioList.visibility=if(opened) View.VISIBLE else View.GONE
                 expand.text=if(opened) "收起录音" else "展开 ${rows.size} 段"
                 expand.contentDescription=if(opened) "收起录音（${rows.size} 段）" else "展开录音（${rows.size} 段）"
@@ -532,7 +569,6 @@ class MainActivity : Activity() {
             box.addView(controls)
             box.addView(audioList)
             if(rows.isEmpty()) box.addView(uiText("无录音，声级记录仍可用于报告",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(4),0,dp(4)) })
-            rows.forEach { addRecordingRow(audioList,it,session?.status in setOf("monitoring","deleting")) }
             updateExpansion()
         }
 
@@ -608,7 +644,7 @@ class MainActivity : Activity() {
         return file.takeIf { it.parentFile==base && File(it,"READY").isFile }
     }
     private fun setAllRecordSelection(selected: Boolean) {
-        refreshRecords()
+        if(!recordsReady) return
         selectedReportSessions.clear()
         if(selected) selectedReportSessions.addAll(recordSessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id })
         updateReportButton()
@@ -779,7 +815,7 @@ class MainActivity : Activity() {
         }
     }
     override fun onResume() {
-        super.onResume(); updateBatteryStatus(); handler.post(ticker); if(selectedTab==1) refreshRecords()
+        super.onResume(); updateBatteryStatus(); handler.post(ticker); if(selectedTab==1) refreshRecords(false)
         if(intent.getBooleanExtra(DailyReservation.STOP_CHOICES,false)) {
             intent.removeExtra(DailyReservation.STOP_CHOICES); reservationResumeAttempted=true; showReservationStopChoices()
         } else resumeSavedReservation()
@@ -795,5 +831,5 @@ class MainActivity : Activity() {
         }
     }
     override fun onPause() { recordingPlayer?.close(); handler.removeCallbacks(ticker); super.onPause() }
-    override fun onDestroy() { recordingPlayer?.close(); progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
+    override fun onDestroy() { recordReader.shutdownNow(); recordingPlayer?.close(); progressDialog?.dismiss(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 }

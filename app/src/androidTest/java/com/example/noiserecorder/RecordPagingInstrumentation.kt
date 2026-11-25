@@ -26,6 +26,7 @@ class RecordPagingInstrumentation : Instrumentation() {
             runOnMainSync { tab.invoke(activity,1) }
             val total=EvidenceStore(targetContext).use { it.sessions().size }
             check(total>15) { "Need more than 15 existing periods for this device check; got $total" }
+            waitFor { !field("recordsQueryPending").getBoolean(activity) && count()>0 }
             check(count()==15)
             note("PASS: first page renders exactly 15 periods")
             val select=field("selectAllPeriods").get(activity) as android.widget.CheckBox
@@ -51,7 +52,21 @@ class RecordPagingInstrumentation : Instrumentation() {
             note("PASS: scrolling after the final group adds no duplicate periods")
             runOnMainSync { tab.invoke(activity,2); tab.invoke(activity,1) }
             check(count()==total)
+            waitFor { !field("recordsQueryPending").getBoolean(activity) }
             note("PASS: switching tabs preserves the loaded range")
+            val records=field("records").get(activity) as android.widget.LinearLayout
+            val first=records.getChildAt(0)
+            var elapsed=0L
+            runOnMainSync {
+                tab.invoke(activity,0)
+                val before=SystemClock.elapsedRealtime()
+                tab.invoke(activity,1)
+                elapsed=SystemClock.elapsedRealtime()-before
+            }
+            waitFor { !field("recordsQueryPending").getBoolean(activity) }
+            check(records.getChildAt(0)===first) { "Unchanged records rebuilt on tab switch" }
+            check(elapsed<250) { "Tab callback blocked for $elapsed ms" }
+            note("PASS: cached cards reused and tab callback returns in $elapsed ms")
             @Suppress("UNCHECKED_CAST")
             val boxes=field("recordSelectionBoxes").get(activity) as Map<Long,android.widget.CheckBox>
             check(boxes.all { (id,box) -> box.isChecked==(id in eligible) })
