@@ -182,12 +182,15 @@ class MainActivity : Activity() {
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
         val reportActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
         addAction(reportActions,uiAction("预览报告") { previewReport() })
-        addAction(reportActions,uiAction("导出报告") {
-            AlertDialog.Builder(this).setTitle("选择报告格式")
-                .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）")) { _, index -> chooseReportExport(listOf("docx","html","reportzip")[index]) }
+        addAction(reportActions,uiAction("导出") {
+            if(exporting) { toast("请等待当前任务完成"); return@uiAction }
+            AlertDialog.Builder(this).setTitle("选择导出内容")
+                .setItems(arrayOf("Word 报告（含音频附件）","独立 HTML 报告（含音频）","完整报告包（Word + HTML + 音频）","原始证据包（WAV + CSV + SHA-256）")) { _, index ->
+                    if(index==3) chooseExport("zip")
+                    else chooseReportExport(listOf("docx","html","reportzip")[index])
+                }
                 .setNegativeButton("取消",null).show()
-        })
-        addAction(reportActions,uiAction("导出证据包") { chooseExport("zip") }.apply { contentDescription="导出证据包（原始 WAV + CSV + SHA-256）" })
+        }.apply { contentDescription="导出报告或原始证据包" })
         content.addView(reportActions)
         content.addView(uiAction("删除本地所有已生成报告",destructive=true,outlined=false) { deleteReports() },LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity=Gravity.END; topMargin=dp(4) })
         recordSummary=uiText("",13f,Color.rgb(100,116,139)).apply { setPadding(0,dp(8),0,0) }
