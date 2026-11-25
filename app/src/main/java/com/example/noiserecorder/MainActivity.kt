@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var threshold: EditText
     private lateinit var offset: EditText
     private lateinit var records: LinearLayout
+    private val recordSelectionBoxes=mutableMapOf<Long,CheckBox>()
     private var recordSessions=emptyList<MonitorSession>()
     private var recordAudio=emptyList<Evidence>()
     private var recordLimit=15
@@ -172,6 +173,10 @@ class MainActivity : Activity() {
         recordsHeading.addView(uiAction("刷新",outlined=false) { recordLimit=15; pages[1].scrollTo(0,0); refreshRecords() },LinearLayout.LayoutParams(dp(64),ViewGroup.LayoutParams.WRAP_CONTENT))
         content.addView(recordsHeading)
         label("历史记录可随时生成报告或删除；当前监听时段结束后可操作。预约等待期间可清理全部记录。",13f)
+        val selectionActions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        addAction(selectionActions,uiAction("全选时段") { setAllRecordSelection(true) })
+        addAction(selectionActions,uiAction("取消全选") { setAllRecordSelection(false) })
+        content.addView(selectionActions)
         reportButton=uiAction("生成所选时段报告（0）",primary=true) { generateSelectedSessionReport() }
         reportButton.contentDescription="生成所选时段报告"
         content.addView(reportButton,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(8); bottomMargin=dp(8) })
@@ -442,6 +447,7 @@ class MainActivity : Activity() {
     }
     private fun refreshRecords() {
         records.removeAllViews()
+        recordSelectionBoxes.clear()
         val (list,sessions) = EvidenceStore(this).use { store -> if (!MonitorService.running) store.recover(); store.list() to store.sessions() }
         recordSummary.text="${sessions.size} 个监听时段 · ${list.size} 段录音"
         selectedReportSessions.retainAll(sessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id }.toSet())
@@ -492,13 +498,11 @@ class MainActivity : Activity() {
             if(session!=null) addAction(controls,CheckBox(this).apply {
                 text="选入报告"; textSize=14f; setTextColor(Color.rgb(51,65,85)); minHeight=dp(48)
                 contentDescription="选择报告时段 ${session.id}"
+                recordSelectionBoxes[session.id]=this
                 isChecked=session.id in selectedReportSessions
                 isEnabled=session.status !in setOf("monitoring","deleting")
                 setOnClickListener {
-                    if(isChecked) {
-                        if(selectedReportSessions.size>=31) { isChecked=false; toast("一次最多选择 31 个监听时段") }
-                        else selectedReportSessions.add(session.id)
-                    } else selectedReportSessions.remove(session.id)
+                    if(isChecked) selectedReportSessions.add(session.id) else selectedReportSessions.remove(session.id)
                     updateReportButton()
                 }
             })
@@ -598,7 +602,15 @@ class MainActivity : Activity() {
         val file=File(base,value).canonicalFile
         return file.takeIf { it.parentFile==base && File(it,"READY").isFile }
     }
+    private fun setAllRecordSelection(selected: Boolean) {
+        refreshRecords()
+        selectedReportSessions.clear()
+        if(selected) selectedReportSessions.addAll(recordSessions.filter { it.status !in setOf("monitoring","deleting") }.map { it.id })
+        updateReportButton()
+        if(selected && selectedReportSessions.size>31) toast("已全选 ${selectedReportSessions.size} 个历史时段；每份报告最多 31 个，请分批生成")
+    }
     private fun updateReportButton() {
+        recordSelectionBoxes.forEach { (id,box) -> box.isChecked=id in selectedReportSessions }
         if(::reportButton.isInitialized) reportButton.text="生成所选时段报告（${selectedReportSessions.size}）"
     }
     private fun generateSelectedSessionReport() {
@@ -608,6 +620,7 @@ class MainActivity : Activity() {
         updateReportButton()
         val chosen=sessions.filter { it.id in selectedReportSessions }
         if(chosen.isEmpty()) { toast("请先勾选已结束的历史监听时段"); return }
+        if(chosen.size>31) { toast("每份报告最多 31 个监听时段，请取消部分选择后分批生成"); return }
         val ids=chosen.map { it.id }.toSet()
         AlertDialog.Builder(this).setTitle("生成 ${chosen.size} 个监听时段的报告？")
             .setMessage(chosen.joinToString("\n\n") { sessionTitle(it) }+"\n\n将包含这些时段的全部声级、超限统计和可用录音，无需选择单个录音。")
